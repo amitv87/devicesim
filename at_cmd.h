@@ -163,7 +163,7 @@ FUNC_IMPL(CCLK,{
   IF_REQ(GET){// +CCLK: "22/06/10,17:26:37+22"
     struct tm tm;
     time_t now = clock_now()/1000;
-    localtime_r(&now, &tm);
+    gmtime_r(&now, &tm);
     PRINT_BUFF("%02d/%02d/%02d,%02d:%02d:%02d%+03d", tm.tm_year - 100, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec, 0);
     AT_OUTPUT_ARGS_LINE(ch, (char*)cmd->name, AT_SEP, QUOTE_STRING(tbuff))
   }
