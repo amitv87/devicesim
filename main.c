@@ -8,29 +8,75 @@
 
 #include "at_cmd.h"
 
-static bool setup_ate_transport();
-static bool setup_nmea_transport();
+typedef struct{
+  io_handle_t input_handle;
+  bool use_stdin;
+  int output_fd;
+  uint32_t baud;
+  char* name;
+  char* tty_path;
+  char* slave_path;
+  char* symlink_path;
+  bool is_symlinked;
+} transport_t;
 
-static uint32_t ate_baud = 0, nmea_baud = 0;
-static char *ate_paths[2] = {0}, *nmea_paths[2] = {0};
-static int ate_output_fd = -1, nmea_output_fd = -1;
+static bool make_symlink(char* dest, char* src){
+  unlink(dest);
+  int rc = symlink(src, dest);
+  if(rc != 0){
+    LOG("symlink %s -> %s, failed with rc: %d, msg: %s (%d)", dest, src, rc, strerror(errno), errno);
+    return false;
+  }
+  return true;
+}
+
+static bool setup_transport(transport_t* transport){
+  transport->slave_path = 0;
+  if(transport->tty_path) transport->input_handle.fd = transport->output_fd = io_tty_open(transport->tty_path, transport->baud, &transport->slave_path);
+  else {
+    transport->output_fd = STDOUT_FILENO;
+    if(transport->use_stdin) transport->input_handle.fd = STDIN_FILENO;
+  }
+  if(transport->output_fd < 0){
+    LOG("open %s -> err: %d, msg: %s", transport->tty_path, errno, strerror(errno));
+    return false;
+  }
+  if(transport->input_handle.fd >= 0) io_reg_handle(&transport->input_handle);
+
+  if(transport->tty_path){
+    transport->is_symlinked = make_symlink(transport->symlink_path, transport->slave_path);
+    LOG("%s path: %s", transport->name, transport->is_symlinked ? transport->symlink_path : transport->slave_path);
+  }
+
+  return transport->output_fd >= 0;
+}
+
+static void close_transport(transport_t* transport){
+  if(transport->input_handle.fd >= 0) io_dereg_handle(&transport->input_handle);
+  transport->input_handle.fd = -1;
+  if(transport->tty_path && transport->output_fd >= 0) close(transport->output_fd);
+  if(transport->is_symlinked) unlink(transport->symlink_path);
+}
+
+static void handle_read_error(transport_t* transport, int rc){
+  if(rc < 0){LOG("read rc: %d, err: %d, msg: %s\r\n", rc, errno, strerror(errno));}
+  else{LOG("%s -> EOF", transport->tty_path ? transport->tty_path : "stdin");}
+  close(transport->input_handle.fd);
+  io_dereg_handle(&transport->input_handle);
+  transport->input_handle.fd = -1;
+  if(transport->slave_path && setup_transport(transport));
+  else io_stop_loop();
+}
 
 static int ate_output(at_engine_t *engine, uint8_t* data, size_t len){
-  return io_write(ate_output_fd, data, len);
+  transport_t* transport = engine->usr_data;
+  return io_write(transport->output_fd, data, len);
 }
 
 static void on_ate_input(io_handle_t* handle, uint8_t fd_mode_mask){
   int rc = read(handle->fd, io_rx_buff, sizeof(io_rx_buff));
   if(rc > 0) at_engine_input(handle->usr_data, 0, io_rx_buff, rc);
-  else{
-    if(rc < 0){LOG("read rc: %d, err: %d, msg: %s\r\n", rc, errno, strerror(errno));}
-    else{LOG("%s -> EOF", ate_paths[0] ? ate_paths[0] : "stdin");}
-    close(handle->fd);
-    io_dereg_handle(handle);
-    handle->fd = -1;
-    if(ate_paths[1] && setup_ate_transport());
-    else io_stop_loop();
-  }
+  else handle_read_error((transport_t*)handle, rc);
 }
 
 static void fetch_loc_info(nmea_gen_t *gen, float lat_lng[2]){
@@ -39,30 +85,17 @@ static void fetch_loc_info(nmea_gen_t *gen, float lat_lng[2]){
 }
 
 static int on_nmea_output(nmea_gen_t *gen, char* sentence, size_t length){
-  return io_write(nmea_output_fd, (uint8_t*)sentence, length);
+  transport_t* transport = gen->usr_data;
+  return io_write(transport->output_fd, (uint8_t*)sentence, length);
 }
 
 static void on_nmea_input(io_handle_t* handle, uint8_t fd_mode_mask){
   int rc = read(handle->fd, io_rx_buff, sizeof(io_rx_buff));
   if(rc > 0); // todo nmea_input
-  else{
-    if(rc < 0){LOG("read rc: %d, err: %d, msg: %s\r\n", rc, errno, strerror(errno));}
-    else{LOG("%s -> EOF", nmea_paths[0] ? nmea_paths[0] : "stdin");}
-    close(handle->fd);
-    io_dereg_handle(handle);
-    handle->fd = -1;
-    if(ate_paths[1] && setup_nmea_transport());
-    else io_stop_loop();
-  }
+  else handle_read_error((transport_t*)handle, rc);
 }
 
 static at_engine_t engine = {0};
-
-static io_handle_t ate_input_handle = {
-  .usr_data = &engine,
-  .cb = on_ate_input,
-  .fd_mode_mask = FD_READ | FD_EXCEPT,
-};
 
 #define SAT_INF(p,e,a,s) {.prn = p, .ele = e, .azi = a, .snr = s}
 #define SAT_GRP(x, mc, ...) [NMEA_TALKER(x)] = {.max_count = mc, .sats = __VA_ARGS__}
@@ -101,53 +134,28 @@ static nmea_gen_t nmea_gen = {
   },
 };
 
-static io_handle_t nmea_input_handle = {
-  .usr_data = &nmea_gen,
-  .cb = on_nmea_input,
-  .fd_mode_mask = FD_READ | FD_EXCEPT,
+static transport_t ate_transport = {
+  .input_handle = {
+    .fd_mode_mask = FD_READ | FD_EXCEPT,
+    .usr_data = &engine, .cb = on_ate_input,
+  },
+  .use_stdin = true,
+  .output_fd = -1, .baud = 0,
+  .name = "gsm_device",
+  .symlink_path = "/tmp/tty.gsm",
 };
 
-static char* make_symlink(char* dest, char* src){
-  unlink(dest);
-  int rc = symlink(src, dest);
-  if(rc != 0){
-    LOG("symlink %s -> %s, failed with rc: %d, msg: %s (%d)", dest, src, rc, strerror(errno), errno);
-    return NULL;
-  }
-  return dest;
-}
+static transport_t nmea_transport = {
+  .input_handle = {
+    .fd_mode_mask = FD_READ | FD_EXCEPT,
+    .usr_data = &nmea_gen, .cb = on_nmea_input,
+  },
+  .name = "gnss_device",
+  .output_fd = -1, .baud = 0,
+  .symlink_path = "/tmp/tty.gnss",
+};
 
-static bool setup_ate_transport(){
-  ate_paths[1] = 0;
-  if(ate_paths[0]) ate_input_handle.fd = ate_output_fd = io_tty_open(ate_paths[0], ate_baud, &ate_paths[1]);
-  else ate_output_fd = STDOUT_FILENO, ate_input_handle.fd = STDIN_FILENO;
-
-  if(ate_input_handle.fd >= 0) io_reg_handle(&ate_input_handle);
-  else LOG("open %s -> err: %d, msg: %s", ate_paths[0], errno, strerror(errno));
-
-  if(ate_paths[1]){
-    char* symlink_path = make_symlink("/tmp/tty.gsm", ate_paths[1]);
-    LOG("gsm_device_path: %s", symlink_path ? symlink_path : ate_paths[1]);
-  }
-
-  return ate_input_handle.fd >= 0;
-}
-
-static bool setup_nmea_transport(){
-  nmea_paths[1] = 0;
-  nmea_input_handle.fd = -1;
-  if(nmea_paths[0]) nmea_input_handle.fd = nmea_output_fd = io_tty_open(nmea_paths[0], nmea_baud, &nmea_paths[1]);
-  else nmea_output_fd = STDOUT_FILENO;
-
-  if(nmea_input_handle.fd > 0) io_reg_handle(&nmea_input_handle);
-  else if(nmea_paths[0]) LOG("open %s -> err: %d, msg: %s", nmea_paths[0], errno, strerror(errno));
-
-  if(nmea_paths[1]){
-    char* symlink_path = make_symlink("/tmp/tty.gnss", nmea_paths[1]);
-    LOG("gnss_device_path: %s", symlink_path ? symlink_path : nmea_paths[1]);
-  }
-  return nmea_output_fd >= 0;
-}
+static transport_t* transports[] = {&ate_transport, &nmea_transport};
 
 int main(int argc, char *argv[]){
   bool is_path = false, is_baud = false;
@@ -156,22 +164,25 @@ int main(int argc, char *argv[]){
       case 'p': is_path = true; break;
       case 'b': is_baud = true; break;
       case 'a':
-        if(is_path) ate_paths[0] = optarg;
-        else if(is_baud) ate_baud = atoi(optarg);
+        if(is_path) ate_transport.tty_path = optarg;
+        else if(is_baud) ate_transport.baud = atoi(optarg);
         is_path = is_baud = false;
         break;
       case 'n':
-        if(is_path) nmea_paths[0] = optarg;
-        else if(is_baud) nmea_baud = atoi(optarg);
+        if(is_path) nmea_transport.tty_path = optarg;
+        else if(is_baud) nmea_transport.baud = atoi(optarg);
         is_path = is_baud = false;
         break;
       case '?': LOG("Unknown option: %c, %s", optopt, optarg); return 1;
     }
   }
 
+  engine.usr_data = &ate_transport;
+  nmea_gen.usr_data = &nmea_transport;
+
   io_init_loop();
-  if(!setup_ate_transport()) return -1;
-  if(!setup_nmea_transport()) return -1;
+
+  for(int i = 0; i < countof(transports); i++) if(!setup_transport(transports[i])) return -1;
 
   at_engine_init(&engine, ate_output);
   for(int i = 0; i < countof(cmds); i++) at_engine_add_cmd(&engine, &cmds[i]);
@@ -191,13 +202,8 @@ int main(int argc, char *argv[]){
   nmea_gen_start(&nmea_gen, 1000);
 
   io_run_loop();
-
   LOG("exitting...");
-
   at_engine_stop(&engine);
-  io_dereg_handle(&ate_input_handle);
-  io_dereg_handle(&nmea_input_handle);
-  if(ate_paths[0]) close(ate_output_fd);
-  if(nmea_paths[0]) close(nmea_output_fd);
+  for(int i = 0; i < countof(transports); i++) close_transport(transports[i]);
   return 0;
 }
