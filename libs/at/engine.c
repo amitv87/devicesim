@@ -12,22 +12,26 @@ const char* at_ch_mode_txt(at_ch_mode mode){
   return "UNK";
 }
 
-static void reset_channel(at_channel_t* ch){
+static void reset_channel(at_channel_t* ch, at_ch_mode mode){
+  if(mode == AT_CH_MODE(CLOSED)) ch->mode = mode;
+
   if(ch->pppd.usr_data == ch){
     ch->pppd.usr_data = NULL;
     io_spawn_wait(&ch->pppd, true);
     io_dereg_handle(&ch->pppd_handle);
     close(ch->pppd_handle.fd);
     ch->pppd_handle = (io_handle_t){.fd = -1};
+  }
 
-    ch->mode = AT_CH_MODE(CMD);
-    line_reader_reset(&ch->reader);
-
+  if(ch->mode == AT_CH_MODE(DATA)){
     at_cmd_resp_t *resp = NULL;
     at_cmd_raw_resp_t res = {.type = CMD_RES(DCE_RC), .value = DCE_RC(NOCARRIER)};
     at_cmd_resp(res, NULL, &resp);
     AT_OUTPUT_ARGS_LINE(ch, AT_NEWLINE, resp->txt)
   }
+
+  ch->mode = mode;
+  line_reader_reset(&ch->reader);
 }
 
 static void cmux_on_evt(cmux_t *cmux, size_t ch_id, cmux_event_type event){
@@ -35,12 +39,11 @@ static void cmux_on_evt(cmux_t *cmux, size_t ch_id, cmux_event_type event){
   LOG("ch%zu -> %s", ch_id, event ? "closed" : "open");
   if(ch_id < countof(engine->channels)){
     at_channel_t* ch = &engine->channels[ch_id];
-    line_reader_reset(&ch->reader);
-    if(ch_id == 0) ch->mode = event == CMUX_CHANNEL_OPEN ? AT_CH_MODE(CMUX) : AT_CH_MODE(CMD);
-    else{
-      reset_channel(ch);
-      ch->mode = event == CMUX_CHANNEL_OPEN ? AT_CH_MODE(CMD) : AT_CH_MODE(CLOSED);
-    }
+    at_ch_mode mode = ch_id ? (event == CMUX_CHANNEL_OPEN ? AT_CH_MODE(CMD) : AT_CH_MODE(CLOSED)) :
+      (ch->mode = event == CMUX_CHANNEL_OPEN ? AT_CH_MODE(CMUX) : AT_CH_MODE(CMD));
+    reset_channel(ch, mode);
+
+    if(ch_id == 0) for(size_t i = 1; i < countof(ch->engine->channels); i++) reset_channel(&ch->engine->channels[i], AT_CH_MODE(CLOSED));
   }
 }
 
@@ -93,7 +96,7 @@ static void on_cmd_line(line_reader_t *reader, char* data, size_t length){
       at_cmd_parse_result_t result = {.args = {.argc = sizeof(argv), .argv = argv}};
       if(at_cmd_parse(data, cmd_len, &result)){
 
-        // LOG("cmd: %s, type: %s, argc: %zu", result.cmd, at_cmd_type_txt(result.type), result.args.argc);
+        // LOG("ch%zu cmd: %s, type: %s, argc: %zu", ch->ch_id, result.cmd, at_cmd_type_txt(result.type), result.args.argc);
         // for(size_t j = 0; j < result.args.argc; j++) LOG("%3zu -> %s", j, result.args.argv[j].value);
 
         at_cmd_t* cmd = ch->engine->cmd_list;
@@ -152,78 +155,10 @@ static void on_cmd_line(line_reader_t *reader, char* data, size_t length){
       data += cmd_len, len -= cmd_len;
     }
   }
-  return;
-  // else if(!at_cmd_parse(data, length, &result)) return;
-
-
-  // LOG("cmd: %s, type: %s, argc: %zu", result.cmd, at_cmd_type_txt(result.type), result.argc);
-  // for(size_t j = 0; j < result.argc; j++) LOG("%3zu -> %s", j, result.argv[j].value);
-
-  at_engine_output(ch->engine, ch->ch_id, (uint8_t*)AT_NEWLINE, sizeof(AT_NEWLINE) - 1);
-
-
-  size_t cmd_len = result.cmd ? strlen(result.cmd) : 0;
-
-  if(cmd_len){
-    at_cmd_t* cmd = ch->engine->cmd_list;
-    while(cmd){
-      if(strcasecmp(cmd->name, result.cmd) == 0){
-        at_cmd_raw_resp_t res;
-        if(cmd->cmd_type_mask & (1 << result.type)){
-          if(cmd_len > 1 && result.args.argc == 0 && result.type == CMD_TYPE(SET)) res = (at_cmd_raw_resp_t){.type = CMD_RES(CME_ERR), .value = CME_ERR(PARAM_INVALID)};
-          else res = cmd->handler(ch, cmd, &result);
-        }
-        else res = (at_cmd_raw_resp_t){
-          .type = CMD_RES(CME_ERR),
-          .value = CME_ERR(OPERATION_NOT_SUPPORTED),
-        };
-
-        at_cmd_resp(res, &type, &resp);
-
-        if(res.type == CMD_RES(DCE_RC)) AT_OUTPUT_ARGS_LINE(ch, resp->txt)
-        else{
-          char code[7] = {0};
-          snprintf(code, sizeof(code) - 1, "%u", resp->code);
-          AT_OUTPUT_ARGS_LINE(ch, "+", type, ": ", code)
-        }
-
-        if(ch->engine->cmux.state == CMUX_STATE_PRE_INIT){
-          cmux_t* cmux = &ch->engine->cmux;
-          *cmux = (cmux_t){
-            .usr_data = ch->engine,
-            .cb = &cmux_cb,
-          };
-          cmux_init(cmux);
-          ch->mode = AT_CH_MODE(CMUX);
-        }
-        return;
-      }
-      cmd = cmd->item.next;
-    }
-  }
-  else{
-    at_cmd_raw_resp_t res = {.type = CMD_RES(DCE_RC), .value = DCE_RC(OK)};
-    at_cmd_resp(res, &type, &resp);
-    AT_OUTPUT_ARGS_LINE(ch, resp->txt)
-    return;
-  }
-
-  /*{
-    at_cmd_raw_resp_t res = {.type = CMD_RES(CME_ERR), .value = CME_ERR(OPERATION_NOT_SUPPORTED)};
-    at_cmd_resp(res, &type, &resp);
-    char code[7] = {0};
-    snprintf(code, sizeof(code) - 1, "%u", resp->code);
-    AT_OUTPUT_ARGS_LINE(ch, "+", type, ": ", code)
-    return;
-  }*/
-
-  at_cmd_raw_resp_t res = {.type = CMD_RES(DCE_RC), .value = DCE_RC(ERROR)};
-  at_cmd_resp(res, &type, &resp);
-  AT_OUTPUT_ARGS_LINE(ch, resp->txt)
 }
 
 void at_engine_stop(at_engine_t *engine){
-  for(size_t i = 0; i < countof(engine->channels); i++) reset_channel(&engine->channels[i]);
+  for(size_t i = 0; i < countof(engine->channels); i++) reset_channel(&engine->channels[i], AT_CH_MODE(CLOSED));
 }
 
 void at_engine_start(at_engine_t *engine){
@@ -268,12 +203,9 @@ void at_engine_input(at_engine_t *engine, size_t ch_id, uint8_t* data, size_t le
     case AT_CH_MODE(CMD): if(ch->echo) at_engine_output(engine, ch_id, data, len); line_reader_read(&ch->reader, data, len); break;
     case AT_CH_MODE(CMUX): cmux_tp_input(&engine->cmux, data, len); break;
     case AT_CH_MODE(DATA): {
-      if(len == 1 && data[0] == '+'){
-        ch->plus_cnt += 1;
-        if(ch->plus_cnt >= 3){
-          reset_channel(ch);
-          break;
-        }
+      if(len == 1 && data[0] == '+' && (ch->plus_cnt += 1) && ch->plus_cnt >= 3){
+        reset_channel(ch, AT_CH_MODE(CMD));
+        break;
       }
       write(ch->pppd_handle.fd, data, len);
       break;
@@ -293,7 +225,7 @@ static void pppd_on_state(io_spawn_t* spawn, io_spawn_state state, void* info){
   LOG("state: %d, info: %d", state, *(int*)info);
   at_channel_t* ch = spawn->usr_data;
   if(!ch) return;
-  if(state == SPAWN_STOPPED) reset_channel(ch);
+  if(state == SPAWN_STOPPED) reset_channel(ch, AT_CH_MODE(CMD));
 }
 
 static void pppd_on_activity(io_spawn_t* pppd, io_std_type type, uint8_t* data, size_t size){
@@ -314,7 +246,7 @@ static void on_pppd_in(io_handle_t* handle, uint8_t fd_mode_mask){
   if(fd_mode_mask & FD_READ){
     int rc = read(handle->fd, io_rx_buff, sizeof(io_rx_buff) - 2);
     if(!rc) goto except;
-    else at_engine_output(ch->engine, ch->ch_id, io_rx_buff, rc);
+    else if(ch->mode == AT_CH_MODE(DATA)) at_engine_output(ch->engine, ch->ch_id, io_rx_buff, rc);
   }
   if(fd_mode_mask & FD_EXCEPT) except: io_spawn_wait(&ch->pppd, false);
 }
@@ -339,6 +271,7 @@ bool at_engine_start_ppp_server(at_channel_t* ch, uint8_t ctx_id){
     // "debug",
     // "persist",
     // "passive",
+    // "record", "ppp_dump.pcap",
     "nodefaultroute",
     "local",
     "nodetach",
