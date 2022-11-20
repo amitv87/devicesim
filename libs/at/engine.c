@@ -18,9 +18,11 @@ static void reset_channel(at_channel_t* ch, at_ch_mode mode){
   if(ch->pppd.usr_data == ch){
     ch->pppd.usr_data = NULL;
     io_spawn_wait(&ch->pppd, true);
+    #ifdef USE_PPPD_PTY
     io_dereg_handle(&ch->pppd_handle);
     close(ch->pppd_handle.fd);
     ch->pppd_handle = (io_handle_t){.fd = -1};
+    #endif
   }
 
   if(ch->mode == AT_CH_MODE(DATA)){
@@ -183,7 +185,9 @@ void at_engine_init(at_engine_t *engine, at_engine_output_tp output){
       .buff = {.bytes = ch->__buff, .len = sizeof(ch->__buff)},
       .on_data = on_cmd_line,
     };
+    #ifdef USE_PPPD_PTY
     ch->pppd_handle = (io_handle_t){.fd = -1};
+    #endif
     line_reader_reset(&ch->reader);
   }
 }
@@ -207,7 +211,11 @@ void at_engine_input(at_engine_t *engine, size_t ch_id, uint8_t* data, size_t le
         reset_channel(ch, AT_CH_MODE(CMD));
         break;
       }
+      #ifdef USE_PPPD_PTY
       write(ch->pppd_handle.fd, data, len);
+      #else
+      io_spawn_input(&ch->pppd, data, len);
+      #endif
       break;
     }
   }
@@ -229,15 +237,17 @@ static void pppd_on_state(io_spawn_t* spawn, io_spawn_state state, void* info){
 }
 
 static void pppd_on_activity(io_spawn_t* pppd, io_std_type type, uint8_t* data, size_t size){
-  data[size] = 0;
-  // LOG("type: %d, %.*s", type, (int)size, data);
   at_channel_t* ch = pppd->usr_data;
   if(!ch) return;
+  #ifdef USE_PPPD_PTY
+  data[size] = 0;
   char* str = NULL;
   if((str = strstr((char*)data, "local  IP address")) || (str = strstr((char*)data, "remote IP address"))) LOG("%s", str);
-  // if(type == IO_STDOUT)
-  // at_engine_output(ch->engine, ch->ch_id, data, size);
-  // else LOG("type: %d, %.*s", type, (int)size, data);
+  #else
+  if(type == IO_STDOUT && ch->mode == AT_CH_MODE(DATA))
+  at_engine_output(ch->engine, ch->ch_id, data, size);
+  else LOG("type: %d, %.*s", type, (int)size, data);
+  #endif
 }
 
 static void on_pppd_in(io_handle_t* handle, uint8_t fd_mode_mask){
@@ -260,14 +270,20 @@ bool at_engine_start_ppp_server(at_channel_t* ch, uint8_t ctx_id){
   bool rc = false;
   if(ch->mode != AT_CH_MODE(CMD)) return rc;
 
+  #ifdef USE_PPPD_PTY
   char* pppd_tty_path = NULL;
   int fd = io_tty_open("/dev/ptmx", 0, &pppd_tty_path);
   if(fd < 0 || !pppd_tty_path) return rc;
   LOG("using: %s", pppd_tty_path);
+  #endif
 
   char* argv[] = {
     "pppd",
-    pppd_tty_path, // pppd fails with nontty stdin hence pipes are not usable
+    #ifdef USE_PPPD_PTY
+    pppd_tty_path,
+    #else
+    "notty", // pppd fails with stdin over pipe hence using notty (isatty check on stdin fails wihtout this)
+    #endif
     // "debug",
     // "persist",
     // "passive",
@@ -302,6 +318,7 @@ bool at_engine_start_ppp_server(at_channel_t* ch, uint8_t ctx_id){
 
     ch->pppd.usr_data = ch;
 
+    #ifdef USE_PPPD_PTY
     ch->pppd_handle = (io_handle_t){
       .cb = on_pppd_in,
       .usr_data = ch,
@@ -310,10 +327,12 @@ bool at_engine_start_ppp_server(at_channel_t* ch, uint8_t ctx_id){
     };
 
     io_reg_handle(&ch->pppd_handle);
+    #endif
   }
   else{
+    #ifdef USE_PPPD_PTY
     close(fd);
-    ch->pppd.usr_data = NULL;
+    #endif
   }
 
   return rc;

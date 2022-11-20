@@ -7,6 +7,7 @@
 #include "../util/spawn.h"
 #include "../util/line_reader.h"
 
+#define USE_PPPD_PTY
 #define MAX_CHANNEL_COUNT (4)
 
 #define CMD_TYPE_MASKS(tst, get, set, exe) (tst<<CMD_TYPE(TST))|(get<<CMD_TYPE(GET))|(set<<CMD_TYPE(SET))|(exe<<CMD_TYPE(EXE))
@@ -40,7 +41,9 @@ typedef struct at_channel_s{
   bool echo;
   int plus_cnt;
   io_spawn_t pppd;
+  #ifdef USE_PPPD_PTY
   io_handle_t pppd_handle;
+  #endif
   at_ch_mode mode;
   line_reader_t reader;
   uint8_t __buff[1024];
