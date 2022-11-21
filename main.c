@@ -204,6 +204,7 @@ int main(int argc, char *argv[]){
   io_run_loop();
   LOG("exitting...");
   at_engine_stop(&engine);
+  usleep(10*1000);
   for(int i = 0; i < countof(transports); i++) close_transport(transports[i]);
   return 0;
 }

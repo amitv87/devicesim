@@ -80,11 +80,15 @@ bool io_spawn_start(io_spawn_t* spawn){
 
 void io_spawn_wait(io_spawn_t* spawn, bool stop){
   if(spawn->pid <= 0) return;
-  if(stop) kill(spawn->pid, SIGINT);
-  int status;
-  waitpid(spawn->pid, &status, 0);
+  int pid = spawn->pid;
   spawn->pid = 0;
-  io_step_loop(0);
+  if(stop){
+    kill(pid, SIGINT);
+    io_step_loop(30);
+  }
+  int status;
+  waitpid(pid, &status, 0);
+  io_step_loop(10);
   for(int i = 0; i < countof(spawn->pipes); i++){
     io_std_pipe* iop = &spawn->pipes[i];
     SWAP_BLOCK(close(iop->pipe.fds[0]););

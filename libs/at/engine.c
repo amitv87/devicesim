@@ -13,7 +13,7 @@ const char* at_ch_mode_txt(at_ch_mode mode){
 }
 
 static void reset_channel(at_channel_t* ch, at_ch_mode mode){
-  if(mode == AT_CH_MODE(CLOSED)) ch->mode = mode;
+  // if(mode == AT_CH_MODE(CLOSED)) ch->mode = mode;
 
   if(ch->pppd.usr_data == ch){
     ch->pppd.usr_data = NULL;
@@ -160,7 +160,9 @@ static void on_cmd_line(line_reader_t *reader, char* data, size_t length){
 }
 
 void at_engine_stop(at_engine_t *engine){
-  for(size_t i = 0; i < countof(engine->channels); i++) reset_channel(&engine->channels[i], AT_CH_MODE(CLOSED));
+  for(size_t i = 1; i < countof(engine->channels); i++) reset_channel(&engine->channels[i], AT_CH_MODE(CLOSED));
+  reset_channel(&engine->channels[0], AT_CH_MODE(CMD));
+  engine->channels[0].mode = AT_CH_MODE(CLOSED);
 }
 
 void at_engine_start(at_engine_t *engine){

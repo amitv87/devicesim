@@ -170,28 +170,26 @@ int io_write(int fd, uint8_t* data, size_t length){
 
 uint64_t io_step_loop(uint32_t timeout_ms){
   uint64_t prev_ts = uptime(), delay_ms = timeout_ms, now = 0, diff = 0;
-  while(should_run || !timeout_ms){
+  int rc = 0;
+  while(true){
     #ifdef USE_POLL
     if(poll_info.count){
-      int rc = poll(poll_info.pollfds, poll_info.count, delay_ms);
-      if(rc > 0){
-        // LOG("poll -> %d", rc);
-        for(size_t i = 0; i < poll_info.count; i++){
-          struct pollfd* p = &poll_info.pollfds[i];
-          if(!p->revents) continue;
-          io_handle_t* handle = poll_info.handles[p->fd];
-          if(!handle) goto do_next;
-          uint8_t fd_mode_mask = 0;
-          if(p->revents & POLLIN) fd_mode_mask |= FD_READ;
-          if(p->revents & POLLOUT) fd_mode_mask |= FD_WRITE;
-          if(p->revents & POLL_ERR_EVENTS) fd_mode_mask |= FD_EXCEPT;
+      rc = poll(poll_info.pollfds, poll_info.count, delay_ms);
+      // LOG("poll -> %d", rc);
+      for(size_t i = 0; rc > 0 && i < poll_info.count; i++){
+        struct pollfd* p = &poll_info.pollfds[i];
+        if(!p->revents) continue;
+        io_handle_t* handle = poll_info.handles[p->fd];
+        if(!handle) goto do_next;
+        uint8_t fd_mode_mask = 0;
+        if(p->revents & POLLIN) fd_mode_mask |= FD_READ;
+        if(p->revents & POLLOUT) fd_mode_mask |= FD_WRITE;
+        if(p->revents & POLL_ERR_EVENTS) fd_mode_mask |= FD_EXCEPT;
 
-          if(fd_mode_mask){
-            if(fd_mode_mask & handle->fd_mode_mask) handle->cb(handle, fd_mode_mask);
-            do_next:
-            rc -= 1;
-            if(rc == 0) break;
-          }
+        if(fd_mode_mask){
+          if(fd_mode_mask & handle->fd_mode_mask) handle->cb(handle, fd_mode_mask);
+          do_next:
+          rc -= 1;
         }
       }
     }
@@ -212,19 +210,17 @@ uint64_t io_step_loop(uint32_t timeout_ms){
     if(maxfd >= 0){
       tv.tv_sec = delay_ms / 1000;
       tv.tv_usec = (delay_ms % 1000) * 1000;
-      int rc = select(maxfd + 1, &fd_sets[0].set, &fd_sets[1].set, &fd_sets[2].set, &tv);
-      if(rc > 0){
-        // LOG("select -> %d", rc);
-        tail = handles;
-        while(tail && rc){
-          int fd = tail->fd;
-          if(fd >= 0){
-            uint8_t fd_mode_mask = 0;
-            for(int i = 0; i < countof(fd_sets) && rc; i++) if(FD_ISSET(fd, &fd_sets[i].set)) fd_mode_mask |= fd_sets[i].mask, rc -= 1;
-            if(fd_mode_mask) tail->cb(tail, fd_mode_mask);
-          }
-          tail = tail->next;
+      rc = select(maxfd + 1, &fd_sets[0].set, &fd_sets[1].set, &fd_sets[2].set, &tv);
+      // LOG("select -> %d", rc);
+      tail = handles;
+      while(tail && rc > 0){
+        int fd = tail->fd;
+        if(fd >= 0){
+          uint8_t fd_mode_mask = 0;
+          for(int i = 0; i < countof(fd_sets) && rc; i++) if(FD_ISSET(fd, &fd_sets[i].set)) fd_mode_mask |= fd_sets[i].mask, rc -= 1;
+          if(fd_mode_mask) tail->cb(tail, fd_mode_mask);
         }
+        tail = tail->next;
       }
     }
     #endif
@@ -232,6 +228,11 @@ uint64_t io_step_loop(uint32_t timeout_ms){
 
     now = uptime();
     diff = now - prev_ts;
+
+    if(rc < 0){
+      LOG("poll/select failed with rc: %d, err: %d -> %s)", rc, errno, strerror(errno));
+      break;
+    }
 
     if(diff >= timeout_ms) break;
     else delay_ms = timeout_ms - diff;
