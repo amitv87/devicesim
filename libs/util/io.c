@@ -230,7 +230,7 @@ uint64_t io_step_loop(uint32_t timeout_ms){
     diff = now - prev_ts;
 
     if(rc < 0){
-      LOG("poll/select failed with rc: %d, err: %d -> %s)", rc, errno, strerror(errno));
+      LOG("poll/select failed with rc: %d, errno: %d -> %s", rc, errno, strerror(errno));
       break;
     }
 
