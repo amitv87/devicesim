@@ -8,6 +8,8 @@
 #define NMEA_TALKER(x)    NMEA_TALKER_##x
 #define NMEA_SENTENCE(x)  NMEA_SENTENCE_##x
 
+#define TALKER_MASK(x) (1 << NMEA_TALKER(x))
+
 typedef enum{
   #define REG_TALKER(x, ...) NMEA_TALKER(x),
   #include "defs.h"

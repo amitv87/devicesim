@@ -25,7 +25,6 @@ typedef struct io_timer_s{
 } io_timer_t;
 
 typedef struct io_handle_s{
-  io_handle_t* next;
   int fd;
   on_fd_activity cb;
   uint8_t fd_mode_mask;

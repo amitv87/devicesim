@@ -11,17 +11,28 @@
 
 #define __PACKED__ __attribute__((__packed__))
 
+#define min(a,b)           \
+({                         \
+  __typeof__ (a) _a = (a); \
+  __typeof__ (b) _b = (b); \
+  _a < _b ? _a : _b;       \
+})
+
 #define countof(x) (sizeof(x)/sizeof(x[0]))
 
 #define __FILENAME__ (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__)
 
 #define LOG(fmt, ...) fprintf(stderr, "[%llu|%s:%d|%s] " fmt "\r\n", uptime(), __FILENAME__, __LINE__, __func__, ##__VA_ARGS__);
 
-#define CHK_ERR(func, ...) if((ret = func(__VA_ARGS__))){fprintf(stderr, #func " ret: %d, err: %d, msg: %s\r\n", ret, errno, strerror(errno));}
+#define HDUMP(data, length, fmt, ...) hexdump(data, length, fmt "\r\n", ##__VA_ARGS__)
+
+#define CHK_ERR(func, ...) if((ret = func(__VA_ARGS__))){LOG(#func " ret: %d, err: %d, msg: %s", ret, errno, strerror(errno));}
 
 typedef struct{
   uint8_t* bytes;
   size_t r_idx, w_idx, len;
 } io_buff_t;
+
+void hexdump(uint8_t* data, size_t length, const char* header, ...);
 
 #endif

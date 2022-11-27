@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <at/engine.h>
 #include <nmea/generator.h>
+#include <bthci/dev_usb.h>
 
 #include "at_cmd.h"
 
@@ -36,6 +37,7 @@ static bool setup_transport(transport_t* transport){
   else {
     transport->output_fd = STDOUT_FILENO;
     if(transport->use_stdin) transport->input_handle.fd = STDIN_FILENO;
+    else transport->input_handle.fd = -1;
   }
   if(transport->output_fd < 0){
     LOG("open %s -> err: %d, msg: %s", transport->tty_path, errno, strerror(errno));
@@ -43,7 +45,7 @@ static bool setup_transport(transport_t* transport){
   }
   if(transport->input_handle.fd >= 0) io_reg_handle(&transport->input_handle);
 
-  if(transport->tty_path){
+  if(transport->slave_path){
     transport->is_symlinked = make_symlink(transport->symlink_path, transport->slave_path);
     LOG("%s path: %s", transport->name, transport->is_symlinked ? transport->symlink_path : transport->slave_path);
   }
@@ -95,6 +97,17 @@ static void on_nmea_input(io_handle_t* handle, uint8_t fd_mode_mask){
   else handle_read_error((transport_t*)handle, rc);
 }
 
+static void on_hci_input(io_handle_t* handle, uint8_t fd_mode_mask){
+  int rc = read(handle->fd, io_rx_buff, sizeof(io_rx_buff));
+  if(rc > 0) hci_usb_device_input(handle->usr_data, io_rx_buff, rc);
+  else handle_read_error((transport_t*)handle, rc);
+}
+
+static int on_hci_output(hci_usb_device_t* hci_dev, uint8_t* data, size_t length){
+  transport_t* transport = hci_dev->usr_data;
+  return io_write(transport->output_fd, data, length);
+}
+
 static at_engine_t engine = {0};
 
 #define SAT_INF(p,e,a,s) {.prn = p, .ele = e, .azi = a, .snr = s}
@@ -132,7 +145,17 @@ static nmea_gen_t nmea_gen = {
       SAT_INF(3,6,96,28),
     }),
   },
+  .talker_mask = {
+    [NMEA_SENTENCE(RMC)] = TALKER_MASK(GN),
+    [NMEA_SENTENCE(GGA)] = TALKER_MASK(GN),
+    [NMEA_SENTENCE(GST)] = TALKER_MASK(GN),
+    [NMEA_SENTENCE(QSA)] = TALKER_MASK(QZ),
+    [NMEA_SENTENCE(GSA)] = TALKER_MASK(GP) | TALKER_MASK(GL) | TALKER_MASK(GA),
+    [NMEA_SENTENCE(GSV)] = TALKER_MASK(GP) | TALKER_MASK(GL) | TALKER_MASK(GA) | TALKER_MASK(QZ),
+  },
 };
+
+static hci_usb_device_t hci_dev = {};
 
 static transport_t ate_transport = {
   .input_handle = {
@@ -155,55 +178,93 @@ static transport_t nmea_transport = {
   .symlink_path = "/tmp/tty.gnss",
 };
 
-static transport_t* transports[] = {&ate_transport, &nmea_transport};
+static transport_t hci_transport = {
+  .input_handle = {
+    .fd_mode_mask = FD_READ | FD_EXCEPT,
+    .usr_data = &hci_dev, .cb = on_hci_input,
+  },
+  .name = "bthci_device",
+  .tty_path = "/dev/ptmx",
+  .output_fd = -1, .baud = 0,
+  .symlink_path = "/tmp/tty.bthci",
+};
 
-int main(int argc, char *argv[]){
+static usb_dev_info_t hci_devices[] = {
+  {.vid = 0x2357, .pid = 0x0604}, // UB500
+  {.vid = 0x8087, .pid = 0x0029}, // AX200
+  {.vid = 0x0a5c, .pid = 0x22be}, // BCM2070
+  {.vid = 0x0a12, .pid = 0x0001}, // CSR8510
+};
+
+static bool is_hci_device(usb_dev_info_t *dev_info){
+  for(int i = 0; i < countof(hci_devices); i++) if(dev_info->vid == hci_devices[i].vid && dev_info->pid == hci_devices[i].pid) return true;
+  return false;
+}
+
+static void usb_on_device(usb_host_t* host, usb_dev_info_t *dev_info, bool added){
+  LOG("usb device %s, bus: %u, addr: %u, vid: 0x%04x, pid: 0x%04x", added ? "added" : "removed",
+    dev_info->bus, dev_info->addr, dev_info->vid, dev_info->pid);
+
+  if(!is_hci_device(dev_info)) return;
+  bool rc = false;
+  if(added) rc = hci_usb_device_init(&hci_dev, dev_info);
+  else if(usb_device_match(&hci_dev.usb_device, dev_info)) rc = hci_usb_device_deinit(&hci_dev);
+  if(rc){LOG("hci device %s", added ? "online" : "offline");}
+}
+
+static usb_host_t usb_host = {
+  .on_device = usb_on_device,
+};
+
+static transport_t* transports[] = {&ate_transport, &nmea_transport, &hci_transport};
+
+static void parse_args(int argc, char *argv[]){
   bool is_path = false, is_baud = false;
-  for(char c; (c = getopt(argc, argv, "pa:ba:pn:bn:")) != -1;){
+  for(char c; (c = getopt(argc, argv, "pa:ba:pn:bn:ph:bh")) != -1;){
+    transport_t* transport = NULL;
     switch (c){
-      case 'p': is_path = true; break;
-      case 'b': is_baud = true; break;
-      case 'a':
-        if(is_path) ate_transport.tty_path = optarg;
-        else if(is_baud) ate_transport.baud = atoi(optarg);
-        is_path = is_baud = false;
-        break;
-      case 'n':
-        if(is_path) nmea_transport.tty_path = optarg;
-        else if(is_baud) nmea_transport.baud = atoi(optarg);
-        is_path = is_baud = false;
-        break;
-      case '?': LOG("Unknown option: %c, %s", optopt, optarg); return 1;
+      case 'p': is_path = true; continue;
+      case 'b': is_baud = true; continue;
+      case 'a': transport = &ate_transport; break;
+      case 'h': transport = &hci_transport; break;
+      case 'n': transport = &nmea_transport; break;
+      case '?': LOG("Unknown option: %c, %s", optopt, optarg); exit(1);
+    }
+    if(transport){
+      if(is_path) transport->tty_path = optarg;
+      else if(is_baud) transport->baud = atoi(optarg);
     }
   }
+}
+
+int main(int argc, char *argv[]){
+  parse_args(argc, argv);
 
   engine.usr_data = &ate_transport;
   nmea_gen.usr_data = &nmea_transport;
+
+  hci_dev.usr_data = &hci_transport;
+  hci_dev.output = on_hci_output;
+  hci_dev.usb_device.host = &usb_host;
 
   io_init_loop();
 
   for(int i = 0; i < countof(transports); i++) if(!setup_transport(transports[i])) return -1;
 
+  usb_host_init(&usb_host);
+  usb_host_start(&usb_host);
+
   at_engine_init(&engine, ate_output);
   for(int i = 0; i < countof(cmds); i++) at_engine_add_cmd(&engine, &cmds[i]);
   at_engine_start(&engine);
-
-  nmea_set_talker(&nmea_gen, NMEA_SENTENCE(RMC), NMEA_TALKER(GN), 1);
-  nmea_set_talker(&nmea_gen, NMEA_SENTENCE(GGA), NMEA_TALKER(GN), 1);
-  nmea_set_talker(&nmea_gen, NMEA_SENTENCE(GSA), NMEA_TALKER(GP), 1);
-  nmea_set_talker(&nmea_gen, NMEA_SENTENCE(GSA), NMEA_TALKER(GL), 1);
-  nmea_set_talker(&nmea_gen, NMEA_SENTENCE(GSA), NMEA_TALKER(GA), 1);
-  nmea_set_talker(&nmea_gen, NMEA_SENTENCE(QSA), NMEA_TALKER(QZ), 1);
-  nmea_set_talker(&nmea_gen, NMEA_SENTENCE(GSV), NMEA_TALKER(GP), 1);
-  nmea_set_talker(&nmea_gen, NMEA_SENTENCE(GSV), NMEA_TALKER(GL), 1);
-  nmea_set_talker(&nmea_gen, NMEA_SENTENCE(GSV), NMEA_TALKER(GA), 1);
-  nmea_set_talker(&nmea_gen, NMEA_SENTENCE(GSV), NMEA_TALKER(QZ), 1);
-  nmea_set_talker(&nmea_gen, NMEA_SENTENCE(GST), NMEA_TALKER(GP), 1);
   nmea_gen_start(&nmea_gen, 1000);
 
   io_run_loop();
   LOG("exitting...");
   at_engine_stop(&engine);
+  nmea_gen_stop(&nmea_gen);
+  hci_usb_device_deinit(&hci_dev);
+  usb_host_deinit(&usb_host);
   usleep(10*1000);
   for(int i = 0; i < countof(transports); i++) close_transport(transports[i]);
   return 0;

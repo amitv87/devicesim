@@ -9,6 +9,9 @@
 #include <sys/stat.h>
 #include <sys/ioctl.h>
 
+#include <inttypes.h>
+#include <libunwind.h>
+
 #ifdef __linux__
 #include <pty.h>
 #else
@@ -31,18 +34,12 @@
 
 #ifdef USE_POLL
 #include <poll.h>
-
-#define MAX_FD (32)
-
 #define POLL_ERR_EVENTS (POLLERR | POLLNVAL | POLLHUP)
-
-typedef struct{
-  size_t count;
-  struct pollfd pollfds[MAX_FD];
-  io_handle_t* handles[MAX_FD];
-} poll_info_t;
-static poll_info_t poll_info = {0};
 #else
+struct pollfd{
+  int fd;
+  uint8_t events;
+};
 
 typedef struct{
   fd_set set;
@@ -54,10 +51,17 @@ static fd_set_info_t fd_sets[] = {
   {.mask = FD_WRITE},
   {.mask = FD_EXCEPT},
 };
-
-static io_handle_t* handles = NULL;
-
 #endif
+
+#define MAX_FD (32)
+
+typedef struct{
+  int maxfd;
+  size_t count;
+  struct pollfd pollfds[MAX_FD];
+  io_handle_t* handles[MAX_FD];
+} poll_info_t;
+static poll_info_t poll_info = {0};
 
 uint8_t io_rx_buff[1024];
 static struct timeval tv;
@@ -65,60 +69,82 @@ static bool should_run = false;
 static io_timer_t* timers = NULL;
 static uint32_t loop_interval_ms = DEFAULT_LOOP_INTERVAL;
 
-void io_reg_handle(io_handle_t* handle){
-  // LOG("reg_io_handle %p, fd: %d", handle, handle->fd);
-  #ifdef USE_POLL
-  if(handle->fd > MAX_FD || poll_info.handles[handle->fd]) return;
+static int signals[] = {
+  SIGINT,
+  SIGSTOP,
+};
 
+void io_reg_handle(io_handle_t* handle){
+  if(handle->fd > MAX_FD || poll_info.handles[handle->fd]) return;
+  #ifdef USE_POLL
   short events = 0;
   if(handle->fd_mode_mask & FD_READ) events |= POLLIN;
   if(handle->fd_mode_mask & FD_WRITE) events |= POLLOUT;
   if(handle->fd_mode_mask & FD_EXCEPT) events |= POLL_ERR_EVENTS;
-
+  #else
+  uint8_t events = handle->fd_mode_mask;
+  #endif
   poll_info.pollfds[poll_info.count++] = (struct pollfd){.fd = handle->fd, .events = events};
   poll_info.handles[handle->fd] = handle;
-  #else
-  handle->next = NULL;
-  if(!handles) handles = handle;
-  else{
-    io_handle_t* tail = handles;
-    while(tail){
-      if(!tail->next){
-        tail->next = handle;
-        break;
-      }
-      tail = tail->next;
-    }
-  }
-  #endif
+  if(poll_info.maxfd < handle->fd) poll_info.maxfd = handle->fd;
 }
 
 void io_dereg_handle(io_handle_t* handle){
-  // LOG("dereg_io_handle %p, fd: %d", handle, handle->fd);
-  #ifdef USE_POLL
   for(size_t i = 0; i < poll_info.count; i++){
     struct pollfd* p = &poll_info.pollfds[i];
     if(p->fd != handle->fd) continue;
     for(size_t j = i; j < poll_info.count; j++) poll_info.pollfds[j] = poll_info.pollfds[j+1];
     poll_info.count -= 1;
     poll_info.handles[handle->fd] = 0;
+    if(poll_info.maxfd == handle->fd) poll_info.maxfd -= 1;
     break;
   }
-  #else
-  if(!handles) return;
-  else{
-    io_handle_t* tail = handles, *prev = NULL;
-    while(tail){
-      if(tail == handle){
-        if(prev) prev->next = tail->next;
-        else handles = tail->next;
-        break;
-      }
-      prev = tail;
-      tail = tail->next;
+}
+
+#include <dlfcn.h>
+#include <execinfo.h>
+
+#define SIGNALS() REG_SIG(SEGV) REG_SIG(BUS) REG_SIG(ABRT) REG_SIG(ILL) REG_SIG(TRAP) \
+  // REG_SIG(HUP) REG_SIG(INT) REG_SIG(TERM) REG_SIG(QUIT)
+
+#define FOR_SIGS() for(int i = 0; i < sizeof(kDefaulSignals) / sizeof(kDefaulSignals[0]); i++)
+
+static const int kDefaulSignals[] = {
+  #define REG_SIG(x) SIG##x,
+  SIGNALS()
+};
+
+static const char* kDefaulSignalsStr[] = {
+  #undef REG_SIG
+  #define REG_SIG(x) #x,
+  SIGNALS()
+};
+
+static void bt(int sig){
+  LOG();
+
+  const char *event = "UNK";
+
+  FOR_SIGS(){
+    if(kDefaulSignals[i] == sig){
+      event = kDefaulSignalsStr[i];
+      break;
     }
   }
-  #endif
+
+  void *stack[50] = {0};
+  char buffer[128] = {0}, addr[128] = {0};
+  int count = backtrace(stack, sizeof(stack)), cur = 0, skip = 1;
+
+  for(int i = skip; i < count; i++){
+    Dl_info info;
+    snprintf(addr, sizeof(addr), "%p", stack[i]);
+    if(dladdr(stack[i], &info) && info.dli_sname){
+      printf("%d: %s [%s] %s\r\n", i, event, addr, info.dli_sname);
+    }
+  }
+
+  exit(sig);
 }
 
 static void sig_handler(int signal){
@@ -127,7 +153,8 @@ static void sig_handler(int signal){
 }
 
 void io_init_loop(){
-  signal(SIGINT, sig_handler);
+  FOR_SIGS() signal(kDefaulSignals[i], bt);
+  for(int i = 0; i < countof(signals); i++) signal(signals[i], sig_handler);
 }
 
 void io_run_loop(){
@@ -172,8 +199,8 @@ uint64_t io_step_loop(uint32_t timeout_ms){
   uint64_t prev_ts = uptime(), delay_ms = timeout_ms, now = 0, diff = 0;
   int rc = 0;
   while(true){
-    #ifdef USE_POLL
     if(poll_info.count){
+      #ifdef USE_POLL
       rc = poll(poll_info.pollfds, poll_info.count, delay_ms);
       // LOG("poll -> %d", rc);
       for(size_t i = 0; rc > 0 && i < poll_info.count; i++){
@@ -192,38 +219,28 @@ uint64_t io_step_loop(uint32_t timeout_ms){
           rc -= 1;
         }
       }
-    }
-    #else
-    int maxfd = -1;
-    for(int i = 0; i < countof(fd_sets); i++) FD_ZERO(&fd_sets[i].set);
+      #else
+      for(int i = 0; i < countof(fd_sets); i++) FD_ZERO(&fd_sets[i].set);
 
-    io_handle_t* tail = handles;
-    while(tail){
-      int fd = tail->fd;
-      if(fd >= 0){
-        if(fd > maxfd) maxfd = fd;
-        for(int i = 0; i < countof(fd_sets); i++) if(tail->fd_mode_mask & fd_sets[i].mask) FD_SET(fd, &fd_sets[i].set);
+      for(int i = 0; i < poll_info.count; i++){
+        struct pollfd* p = &poll_info.pollfds[i];
+        for(int i = 0; i < countof(fd_sets); i++) if(p->events & fd_sets[i].mask) FD_SET(p->fd, &fd_sets[i].set);
       }
-      tail = tail->next;
-    }
 
-    if(maxfd >= 0){
       tv.tv_sec = delay_ms / 1000;
       tv.tv_usec = (delay_ms % 1000) * 1000;
-      rc = select(maxfd + 1, &fd_sets[0].set, &fd_sets[1].set, &fd_sets[2].set, &tv);
+      rc = select(poll_info.maxfd + 1, &fd_sets[0].set, &fd_sets[1].set, &fd_sets[2].set, &tv);
       // LOG("select -> %d", rc);
-      tail = handles;
-      while(tail && rc > 0){
-        int fd = tail->fd;
-        if(fd >= 0){
-          uint8_t fd_mode_mask = 0;
-          for(int i = 0; i < countof(fd_sets) && rc; i++) if(FD_ISSET(fd, &fd_sets[i].set)) fd_mode_mask |= fd_sets[i].mask, rc -= 1;
-          if(fd_mode_mask) tail->cb(tail, fd_mode_mask);
-        }
-        tail = tail->next;
+
+      for(size_t i = 0; rc > 0 && i < poll_info.count; i++){
+        struct pollfd* p = &poll_info.pollfds[i];
+        io_handle_t* handle = poll_info.handles[p->fd];
+        uint8_t fd_mode_mask = 0;
+        for(int i = 0; i < countof(fd_sets) && rc; i++) if(FD_ISSET(p->fd, &fd_sets[i].set)) fd_mode_mask |= fd_sets[i].mask, rc -= 1;
+        if(fd_mode_mask) handle->cb(handle, fd_mode_mask);
       }
+      #endif
     }
-    #endif
     else if(delay_ms > 0) usleep(delay_ms * 1000);
 
     now = uptime();

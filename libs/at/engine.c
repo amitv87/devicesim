@@ -202,22 +202,36 @@ void at_engine_rem_cmd(at_engine_t *engine, at_cmd_t* cmd){
   LIST_REM(&engine->cmd_list, cmd);
 }
 
+#define DATA_BREAK_CHARS "+++"
+
+static void pppd_input(at_channel_t* ch, uint8_t* data, size_t len){
+  #ifdef USE_PPPD_PTY
+  write(ch->pppd_handle.fd, data, len);
+  #else
+  io_spawn_input(&ch->pppd, data, len);
+  #endif
+}
+
 void at_engine_input(at_engine_t *engine, size_t ch_id, uint8_t* data, size_t len){
-  // LOG("ch%zu -> %.*s", ch_id, (int)len, data);
+  // LOG("ch%zu %zu bytes -> %.*s", ch_id, len, (int)len, data);
   at_channel_t* ch = &engine->channels[ch_id];
   switch(ch->mode){
     case AT_CH_MODE(CMD): if(ch->echo) at_engine_output(engine, ch_id, data, len); line_reader_read(&ch->reader, data, len); break;
     case AT_CH_MODE(CMUX): cmux_tp_input(&engine->cmux, data, len); break;
     case AT_CH_MODE(DATA): {
-      if(len == 1 && data[0] == '+' && (ch->plus_cnt += 1) && ch->plus_cnt >= 3){
-        reset_channel(ch, AT_CH_MODE(CMD));
+      if(ch->plus_cnt + len <= 3 && strncmp((char*)data, DATA_BREAK_CHARS, len) == 0){
+        ch->plus_cnt += len;
+        if(ch->plus_cnt >= 3){
+          reset_channel(ch, AT_CH_MODE(CMD));
+          ch->plus_cnt = 0;
+        }
         break;
       }
-      #ifdef USE_PPPD_PTY
-      write(ch->pppd_handle.fd, data, len);
-      #else
-      io_spawn_input(&ch->pppd, data, len);
-      #endif
+      else if(ch->plus_cnt){
+        pppd_input(ch, (uint8_t*)DATA_BREAK_CHARS, ch->plus_cnt);
+        ch->plus_cnt = 0;
+      }
+      pppd_input(ch, data, len);
       break;
     }
   }

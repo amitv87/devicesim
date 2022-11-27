@@ -108,24 +108,30 @@ void cmux_tp_input(cmux_t *cmux, uint8_t* data, size_t length){
   io_buff_t* frame_buff = &cmux->frame_buff;
   cmux_frame_t* frame = (cmux_frame_t*)frame_buff->bytes;
 
-  retry:
-  while(frame_buff->w_idx < sizeof(cmux_frame_t) && length > 0){
+  retry:;
+  bool got_frame = false;
+  while(length){
+    length -= 1;
+    uint8_t c = *data++;
     if(!cmux->is_recving_frame){
-      if(data[0] == SOF_MARKER) cmux->is_recving_frame = true;
+      frame_buff->w_idx = 0;
+      cmux->is_recving_frame = c == SOF_MARKER;
     }
-    else if(frame_buff->w_idx == 0 && data[0] == SOF_MARKER) cmux->is_recving_frame = false;
-    else frame_buff->bytes[frame_buff->w_idx++] = *data;
-    data += 1, length -= 1;
+    else if(cmux->is_recving_frame){
+      if(frame_buff->w_idx < sizeof(cmux_frame_t) + frame->length + 1) frame_buff->bytes[frame_buff->w_idx++] = c;
+      else{
+        cmux->is_recving_frame = false;
+        if(c == SOF_MARKER){
+          got_frame = true;
+          break;
+        }
+      }
+    }
   }
 
-  if(!cmux->is_recving_frame && length > 0) return;
-
-  if(frame_buff->w_idx < sizeof(cmux_frame_t)) return;
-
-  if(frame_buff->w_idx == sizeof(cmux_frame_t) + frame->length + 1){
+  if(got_frame){
     uint8_t channel = frame->dlci;
     uint8_t frame_type = frame->control & ~PF;
-    // LOG("cmux frame dlci: %u, cr: %u, f_ea: %u, control: 0x%02x, frame_type: %u", frame->dlci, frame->cr, frame->f_ea, frame_type, frame->length);
 
     if(channel > countof(cmux->channel_state)) goto end;
     uint8_t channel_state = cmux->channel_state[channel];
@@ -168,20 +174,8 @@ void cmux_tp_input(cmux_t *cmux, uint8_t* data, size_t length){
         }
         break;
     }
-
     end:
-    frame_buff->w_idx = 0;
-    goto retry;
-  }
-
-  while(length > 0){
-    size_t bytes_needed = sizeof(cmux_frame_t) + frame->length + 1 - frame_buff->w_idx;
-    if(bytes_needed > length) bytes_needed = length;
-    memcpy(frame_buff->bytes + frame_buff->w_idx, data, bytes_needed);
-    frame_buff->w_idx += bytes_needed;
-    data += bytes_needed;
-    length -= bytes_needed;
-    goto retry;
+    if(length) goto retry;
   }
 }
 

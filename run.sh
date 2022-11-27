@@ -14,6 +14,10 @@ BUILD_PATH="$SRC_ROOT_DIR/.build"
 
 [[ -z "$NUM_CPU" ]] && NUM_CPU=$(getconf _NPROCESSORS_ONLN)
 
+export DEPS_DIR_NAME=deps
+export DEPS_SRC_DIR=$SRC_ROOT_DIR/$DEPS_DIR_NAME
+export DEPS_BUILD_PATH=$BUILD_PATH/$DEPS_DIR_NAME
+
 SILENT_MAKE="-s"
 # VERBOSE_ARGS="-DCMAKE_VERBOSE_MAKEFILE=TRUE"
 
@@ -81,11 +85,15 @@ elif [[ $ACTION == "br" ]]; then
   shift;
   compile $app;
   run $app $@;
-elif [[ $ACTION == "bd" ]]; then
+elif [[ $ACTION == "brd" ]]; then
   app=$1
   shift;
   compile $app;
   debug $app $@;
+elif [[ $ACTION == "id" ]] ; then
+  deps/init.sh
+elif [[ $ACTION == "bd" ]]; then
+  deps/build.sh
 else
   run $ACTION $@
 fi
