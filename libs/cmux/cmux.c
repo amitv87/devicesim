@@ -100,6 +100,7 @@ static void send_frame(cmux_t *cmux, uint8_t channel, uint8_t frame_type, uint8_
 
 void cmux_init(cmux_t *cmux){
   cmux->state = CMUX_STATE_INIT;
+  cmux->is_recving_frame = false;
   cmux->frame_buff = (io_buff_t){.bytes = cmux->buff, .len = sizeof(cmux->buff)};
   memset(&cmux->channel_state[1], 0, sizeof(cmux->channel_state) - sizeof(cmux->channel_state[0]));
 }
