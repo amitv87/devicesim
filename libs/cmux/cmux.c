@@ -110,23 +110,17 @@ void cmux_tp_input(cmux_t *cmux, uint8_t* data, size_t length){
 
   retry:;
   bool got_frame = false;
-  while(length){
-    length -= 1;
-    uint8_t c = *data++;
-    if(!cmux->is_recving_frame){
+  while(length && !got_frame){
+    if(cmux->is_recving_frame){
+      frame_buff->bytes[frame_buff->w_idx++] = data[0];
+      if(frame_buff->w_idx == sizeof(cmux_frame_t) + frame->length + 1) cmux->is_recving_frame = false;
+    }
+    else if(data[0] == SOF_MARKER){
+      if(frame_buff->w_idx) got_frame = true;
+      else cmux->is_recving_frame = true;
       frame_buff->w_idx = 0;
-      cmux->is_recving_frame = c == SOF_MARKER;
     }
-    else if(cmux->is_recving_frame){
-      if(frame_buff->w_idx < sizeof(cmux_frame_t) + frame->length + 1) frame_buff->bytes[frame_buff->w_idx++] = c;
-      else{
-        cmux->is_recving_frame = false;
-        if(c == SOF_MARKER){
-          got_frame = true;
-          break;
-        }
-      }
-    }
+    data += 1, length -= 1;
   }
 
   if(got_frame){

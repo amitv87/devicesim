@@ -66,25 +66,22 @@ static cmux_cb_t cmux_cb = {
 };
 
 static void on_cmd_line(line_reader_t *reader, char* data, size_t length){
-  if(length < 2 || strncasecmp("AT", data, 2) != 0) return;
-  data += 2, length -= 2;
-
   char* type = NULL;
   at_cmd_resp_t *resp = NULL;
   at_channel_t* ch = reader->usr_data;
-
-  at_cmd_paramt_t argv[10] = {0};
-  at_cmd_parse_result_t result = {.args = {.argc = sizeof(argv), .argv = argv}};
-
   at_engine_output(ch->engine, ch->ch_id, (uint8_t*)AT_NEWLINE, sizeof(AT_NEWLINE) - 1);
-
-  if(!length){
+  if(length < 2 || strncasecmp("AT", data, 2) != 0){
+    at_cmd_raw_resp_t res = {.type = CMD_RES(DCE_RC), .value = DCE_RC(ERROR)};
+    at_cmd_resp(res, &type, &resp);
+    AT_OUTPUT_ARGS_LINE(ch, resp->txt)
+  }
+  else if(length == 2){
     at_cmd_raw_resp_t res = {.type = CMD_RES(DCE_RC), .value = DCE_RC(OK)};
     at_cmd_resp(res, &type, &resp);
     AT_OUTPUT_ARGS_LINE(ch, resp->txt)
-    return;
   }
   else{
+    data += 2, length -= 2;
     at_cmd_paramt_t argv[10] = {0};
     at_cmd_args_t cmds = {.argc = 10};
     size_t num_cmds = at_split_args(data, ';', &cmds);
