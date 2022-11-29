@@ -19,7 +19,7 @@ typedef struct hci_usb_device_s{
   hci_output output;
   io_buff_t input_buff;
   size_t rem_acl_bytes, rem_evt_bytes;
-  uint8_t buff[2][256];
+  uint8_t buff[2][2048];
   uint8_t __input_buff[2048];
 } hci_usb_device_t;
 
