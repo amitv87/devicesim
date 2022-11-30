@@ -1,53 +1,93 @@
 #include <stdlib.h>
 #include "host.h"
 
-// #define USB_DEBUG
-
-#define PRINT_DESC(fmt, ...) fprintf(stderr, "[USB]" fmt "\r\n", ##__VA_ARGS__)
-#define IF_READ_STRING(idx) if(libusb_get_string_descriptor_ascii(device_handle, idx, string_desc, sizeof(string_desc)) >= 0)
+// #define PRINT_DEV_DESC
 
 static struct timeval zero_tv = {0};
 
-#ifdef USB_DEBUG
-static void print_desc(libusb_device_handle *device_handle, struct libusb_device_descriptor* dd, struct libusb_config_descriptor* cdesc){
+#ifdef PRINT_DEV_DESC
+
+#define PRINT_DESC(space_width, fmt, ...) fprintf(stderr, "[USB]" "%" #space_width "s" fmt "\r\n", "", ##__VA_ARGS__)
+#define IF_READ_STRING(idx) if((libusb_get_string_descriptor_ascii(device_handle, idx, string_desc, sizeof(string_desc)) >= 0 && string_desc[0] != 0) || (string_desc[0] = 0))
+
+static const char* bcd_version_to_string(uint16_t bcdUSB){
+  static char string[3 + 1 + 2 + 1 + 2 + 1];
+  char *p = string;
+  p += sprintf(string, "%u.%u", (bcdUSB >> 8) & 0xff, (bcdUSB >> 4) & 0xf);
+  if(bcdUSB & 0xf) sprintf(p, ".%u", bcdUSB & 31);
+  return string;
+}
+
+static const char* libusb_speed_to_speed(enum libusb_speed speed){
+  switch(speed){
+    case LIBUSB_SPEED_LOW: return "1.5M";
+    case LIBUSB_SPEED_FULL: return "12M";
+    case LIBUSB_SPEED_HIGH: return "480M";
+    case LIBUSB_SPEED_SUPER: return "5G";
+    case LIBUSB_SPEED_SUPER_PLUS: return "10G";
+  }
+  return "?";
+}
+
+static void print_desc(libusb_device *dev){
+  int ret;
   unsigned char string_desc[256];
-  IF_READ_STRING(dd->iManufacturer)
-    PRINT_DESC("              manufacturer: %s", string_desc);
-  IF_READ_STRING(dd->iProduct)
-    PRINT_DESC("                   product: %s", string_desc);
-  IF_READ_STRING(dd->iSerialNumber)
-    PRINT_DESC("                    serial: %s", string_desc);
-  IF_READ_STRING(cdesc->iConfiguration)
-    PRINT_DESC("                descriptor: %s", string_desc);
+  struct libusb_device_descriptor dd = {};
+  libusb_device_handle* device_handle = NULL;
 
-  for(int if_num = 0; if_num < cdesc->bNumInterfaces; if_num++){
-    PRINT_DESC("              interface[%d]: id = %d", if_num, cdesc->interface[if_num].altsetting[0].bInterfaceNumber);
-    for(int alt_num=0; alt_num<cdesc->interface[if_num].num_altsetting; alt_num++){
-      PRINT_DESC("interface[%d].altsetting[%d]: num endpoints = %d", if_num, alt_num, cdesc->interface[if_num].altsetting[alt_num].bNumEndpoints);
-      PRINT_DESC("   Class.SubClass.Protocol: %02X.%02X.%02X", cdesc->interface[if_num].altsetting[alt_num].bInterfaceClass,
-        cdesc->interface[if_num].altsetting[alt_num].bInterfaceSubClass, cdesc->interface[if_num].altsetting[alt_num].bInterfaceProtocol);
+  CHK_USB_ERR(libusb_get_device_descriptor, dev, &dd); if(ret != 0 ) goto end;
 
-      IF_READ_STRING(cdesc->interface[if_num].altsetting[alt_num].iInterface)
-        PRINT_DESC("               string_desc: %s", string_desc);
+  uint8_t bus = libusb_get_bus_number(dev), addr = libusb_get_device_address(dev), speed = libusb_get_device_speed(dev);
 
-      for(int ep_num=0; ep_num<cdesc->interface[if_num].altsetting[alt_num].bNumEndpoints; ep_num++){
-        const struct libusb_endpoint_descriptor *endpoint = NULL;
-        struct libusb_ss_endpoint_companion_descriptor *ep_comp = NULL;
-        endpoint = &cdesc->interface[if_num].altsetting[alt_num].endpoint[ep_num];
-        PRINT_DESC("       endpoint[%d].address: 0x%02X", ep_num, endpoint->bEndpointAddress);
-        PRINT_DESC("           descriptor type: 0x%02X", endpoint->bDescriptorType);
-        PRINT_DESC("             transfer type: 0x%02X", endpoint->bmAttributes & 0x03);
-        PRINT_DESC("           max packet size: 0x%04X", endpoint->wMaxPacketSize);
-        PRINT_DESC("          polling interval: 0x%02X", endpoint->bInterval);
-        libusb_get_ss_endpoint_companion_descriptor(NULL, endpoint, &ep_comp);
-        if(ep_comp){
-          PRINT_DESC("                 max burst: 0x%02X   (USB 3.0)", ep_comp->bMaxBurst);
-          PRINT_DESC("        bytes per interval: 0x%04X (USB 3.0)", ep_comp->wBytesPerInterval);
-          libusb_free_ss_endpoint_companion_descriptor(ep_comp);
+  PRINT_DESC(1, "Bus[%hhu].Addr[%hhu]: vid 0x%04x, pid 0x%04x, USB%s @ %sbps (%s speed)", bus, addr,
+    dd.idVendor, dd.idProduct, bcd_version_to_string(dd.bcdUSB), libusb_speed_to_speed(speed), ENUM_TO_STR(libusb_speed, speed));
+
+  CHK_USB_ERR(libusb_open, dev, &device_handle); if(ret != 0 ) goto end;
+
+  IF_READ_STRING(dd.iManufacturer)  PRINT_DESC(3, "Manufacturer: %s", string_desc);
+  IF_READ_STRING(dd.iProduct)       PRINT_DESC(3, "Product: %s", string_desc);
+  IF_READ_STRING(dd.iSerialNumber)  PRINT_DESC(3, "SerialNumber: %s", string_desc);
+
+  for(uint8_t cf_num = 0; cf_num < dd.bNumConfigurations; cf_num++){
+    struct libusb_config_descriptor* cdesc = NULL;
+    CHK_USB_ERR(libusb_get_config_descriptor, dev, cf_num, &cdesc);
+    if(!cdesc) continue;
+    uint16_t max_current = cdesc->MaxPower * (dd.bcdUSB >= 0x0300 ? 8 : 2);
+    IF_READ_STRING(cdesc->iConfiguration){}
+    PRINT_DESC(3, "Configuration[%u]: %s @ %umA", cf_num, string_desc, max_current);
+    for(int if_num = 0; if_num < cdesc->bNumInterfaces; if_num++){
+      PRINT_DESC(5, "Interface[%d]: ", if_num);
+      for(int alt_num = 0; alt_num < cdesc->interface[if_num].num_altsetting; alt_num++){
+        IF_READ_STRING(cdesc->interface[if_num].altsetting[alt_num].iInterface){}
+        PRINT_DESC(7, "Altsetting[%d]: %s", alt_num, string_desc);
+        PRINT_DESC(9, "InterfaceClass: %s", ENUM_TO_STR(libusb_class_code, cdesc->interface[if_num].altsetting[alt_num].bInterfaceClass));
+        PRINT_DESC(9, "Class.SubClass.Protocol: %02X.%02X.%02X", cdesc->interface[if_num].altsetting[alt_num].bInterfaceClass,
+          cdesc->interface[if_num].altsetting[alt_num].bInterfaceSubClass, cdesc->interface[if_num].altsetting[alt_num].bInterfaceProtocol);
+        for(int ep_num = 0; ep_num < cdesc->interface[if_num].altsetting[alt_num].bNumEndpoints; ep_num++){
+          const struct libusb_endpoint_descriptor *endpoint = NULL;
+          endpoint = &cdesc->interface[if_num].altsetting[alt_num].endpoint[ep_num];
+          PRINT_DESC(11, "Endpoint[%d]: 0x%02X %s %s %u bytes", ep_num, endpoint->bEndpointAddress,
+            ENUM_TO_STR(libusb_endpoint_direction, endpoint->bEndpointAddress & LIBUSB_ENDPOINT_DIR_MASK),
+            ENUM_TO_STR(libusb_endpoint_transfer_type, endpoint->bmAttributes & 0x03),
+            endpoint->wMaxPacketSize
+          );
+          // PRINT_DESC(11, "Interval: %u", endpoint->bInterval);
+          struct libusb_ss_endpoint_companion_descriptor *ep_comp = NULL;
+          libusb_get_ss_endpoint_companion_descriptor(NULL, endpoint, &ep_comp);
+          if(ep_comp){
+            PRINT_DESC(11, "MaxBurst: 0x%02X   (USB 3.0)", ep_comp->bMaxBurst);
+            PRINT_DESC(11, "BytesPerInterval: 0x%04X (USB 3.0)", ep_comp->wBytesPerInterval);
+            libusb_free_ss_endpoint_companion_descriptor(ep_comp);
+          }
         }
       }
     }
+
+    libusb_free_config_descriptor(cdesc);
   }
+
+  end:
+  if(device_handle) libusb_close(device_handle);
 }
 #endif
 
@@ -55,28 +95,8 @@ static void on_hotplug_safe(usb_host_t* host, libusb_device *dev, libusb_hotplug
   uint8_t bus = libusb_get_bus_number(dev);
   uint8_t addr = libusb_get_device_address(dev);
   struct libusb_device_descriptor dd = {};
-  libusb_get_device_descriptor(dev, &dd);
-
-  #ifdef USB_DEBUG
-  const char* evt = event == LIBUSB_HOTPLUG_EVENT_DEVICE_ARRIVED ? "added" : "removed";
-  LOG("%s %p -> bus: %hhu, addr: %hhu, vid: %04x, pid: %04x, bus: %hhu, addr: %hhu", evt, dev, bus, addr, dd.idVendor, dd.idProduct, bus, addr);
-  if(event == LIBUSB_HOTPLUG_EVENT_DEVICE_ARRIVED){
-    struct libusb_config_descriptor* cdesc = NULL;
-    libusb_device_handle* device_handle = NULL;
-    int ret;
-    CHK_USB_ERR(libusb_open, dev, &device_handle);
-    for(uint8_t if_num = 0; if_num < dd.bNumConfigurations; if_num++){
-      cdesc = NULL;
-      CHK_USB_ERR(libusb_get_config_descriptor, dev, if_num, &cdesc);
-      if(cdesc){
-        print_desc(device_handle, &dd, cdesc);
-        libusb_free_config_descriptor(cdesc);
-      }
-    }
-    if(device_handle) libusb_close(device_handle);
-  }
-  #endif
-
+  int ret;
+  CHK_USB_ERR(libusb_get_device_descriptor, dev, &dd); if(ret != 0 ) return;
   usb_dev_info_t info = {
     .dev = dev,
     .bus = bus,
@@ -84,6 +104,10 @@ static void on_hotplug_safe(usb_host_t* host, libusb_device *dev, libusb_hotplug
     .vid = dd.idVendor,
     .pid = dd.idProduct,
   };
+
+  #ifdef PRINT_DEV_DESC
+  if(event == LIBUSB_HOTPLUG_EVENT_DEVICE_ARRIVED) print_desc(dev);
+  #endif
 
   host->on_device(host, &info, event == LIBUSB_HOTPLUG_EVENT_DEVICE_ARRIVED);
 }

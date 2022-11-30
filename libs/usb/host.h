@@ -6,6 +6,23 @@
 
 #define CHK_USB_ERR(func, ...) if((ret = func(__VA_ARGS__))){LOG(#func " ret: %d, err: %s", ret, libusb_strerror(ret));}
 
+#define ENUM_TO_STR_FUNC_NAME(enum_name) enum_name##_to_str
+#define ENUM_TO_STR(enum_name, ...) ENUM_TO_STR_FUNC_NAME(enum_name)(__VA_ARGS__)
+#define ENUM_TO_STR_FUNC(enum_name, ...) const char* ENUM_TO_STR_FUNC_NAME(enum_name)(enum enum_name val)
+
+ENUM_TO_STR_FUNC(libusb_class_code);
+ENUM_TO_STR_FUNC(libusb_descriptor_type);
+ENUM_TO_STR_FUNC(libusb_endpoint_direction);
+ENUM_TO_STR_FUNC(libusb_endpoint_transfer_type);
+ENUM_TO_STR_FUNC(libusb_standard_request);
+ENUM_TO_STR_FUNC(libusb_request_type);
+ENUM_TO_STR_FUNC(libusb_request_recipient);
+ENUM_TO_STR_FUNC(libusb_iso_sync_type);
+ENUM_TO_STR_FUNC(libusb_iso_usage_type);
+ENUM_TO_STR_FUNC(libusb_supported_speed);
+ENUM_TO_STR_FUNC(libusb_bos_type);
+ENUM_TO_STR_FUNC(libusb_speed);
+
 typedef struct usb_host_s usb_host_t;
 
 typedef struct{

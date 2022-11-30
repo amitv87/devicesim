@@ -31,7 +31,7 @@ typedef struct io_handle_s{
   void* usr_data;
 } io_handle_t;
 
-extern uint8_t io_rx_buff[1024];
+extern uint8_t io_rx_buff[4096];
 
 void io_init_loop();
 void io_run_loop();

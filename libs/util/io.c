@@ -63,7 +63,7 @@ typedef struct{
 } poll_info_t;
 static poll_info_t poll_info = {0};
 
-uint8_t io_rx_buff[1024];
+uint8_t io_rx_buff[4096];
 static struct timeval tv;
 static bool should_run = false;
 static io_timer_t* timers = NULL;
