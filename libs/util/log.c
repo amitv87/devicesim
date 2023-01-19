@@ -1,3 +1,4 @@
+#include <unistd.h>
 #include <ctype.h>
 #include <stdarg.h>
 #include "../common.h"
@@ -15,7 +16,7 @@ void hexdump(uint8_t* data, size_t length, const char* header, ...){
   if(header){
     va_list va;
     va_start(va, header);
-    vprintf(header, va);
+    vfprintf(stderr, header, va);
     va_end(va);
 
     int rc = sprintf(hd_buffer, "%p", data);
@@ -27,10 +28,9 @@ void hexdump(uint8_t* data, size_t length, const char* header, ...){
       else ptr_hd += sprintf(ptr_hd, "   ");
     }
     ptr_hd += sprintf(ptr_hd, "   ");
-    for(size_t i = 0; i < bytes_cur_line; i++) {
-      ptr_hd += sprintf(ptr_hd, "%1zx", i);
-    }
-    printf("%s\r\n", hd_buffer);
+    for(size_t i = 0; i < bytes_cur_line; i++) ptr_hd += sprintf(ptr_hd, "%1zx", i);
+    ptr_hd += sprintf(ptr_hd, "\r\n");
+    write(STDERR_FILENO, hd_buffer, ptr_hd - hd_buffer);
   }
   do {
     ptr_hd = hd_buffer;
@@ -50,12 +50,11 @@ void hexdump(uint8_t* data, size_t length, const char* header, ...){
       else ptr_hd += sprintf(ptr_hd, ".");
     }
 
-    ptr_hd += sprintf(ptr_hd, "|");
+    ptr_hd += sprintf(ptr_hd, "|\r\n");
 
-    fprintf(stderr, "%s\r\n", hd_buffer);
+    write(STDERR_FILENO, hd_buffer, ptr_hd - hd_buffer);
     data += bytes_cur_line;
     length -= bytes_cur_line;
   } while(length);
-
   return;
 }

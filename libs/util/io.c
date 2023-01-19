@@ -6,11 +6,9 @@
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <inttypes.h>
 #include <sys/stat.h>
 #include <sys/ioctl.h>
-
-#include <inttypes.h>
-#include <libunwind.h>
 
 #ifdef __linux__
 #include <pty.h>

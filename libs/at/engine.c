@@ -203,7 +203,7 @@ void at_engine_rem_cmd(at_engine_t *engine, at_cmd_t* cmd){
 
 static void pppd_input(at_channel_t* ch, uint8_t* data, size_t len){
   #ifdef USE_PPPD_PTY
-  write(ch->pppd_handle.fd, data, len);
+  io_write(ch->pppd_handle.fd, data, len);
   #else
   io_spawn_input(&ch->pppd, data, len);
   #endif
