@@ -1,5 +1,5 @@
-#ifndef HCI_DEVICE_H
-#define HCI_DEVICE_H
+#ifndef DEVICE_HCI_USB_H
+#define DEVICE_HCI_USB_H
 
 #include "../usb/transfer.h"
 

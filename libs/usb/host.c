@@ -56,7 +56,9 @@ static void print_desc(libusb_device *dev){
     IF_READ_STRING(cdesc->iConfiguration){}
     PRINT_DESC(3, "Configuration[%u]: %s @ %umA", cf_num, string_desc, max_current);
     for(int if_num = 0; if_num < cdesc->bNumInterfaces; if_num++){
-      PRINT_DESC(5, "Interface[%d]: ", if_num);
+      uint8_t if_no = cdesc->interface[if_num].altsetting[0].bInterfaceNumber;
+      for(int i = if_num; i < if_no; i++) PRINT_DESC(5, "Interface[%d]: n/a", i);
+      PRINT_DESC(5, "Interface[%d]: ", if_no);
       for(int alt_num = 0; alt_num < cdesc->interface[if_num].num_altsetting; alt_num++){
         IF_READ_STRING(cdesc->interface[if_num].altsetting[alt_num].iInterface){}
         PRINT_DESC(7, "Altsetting[%d]: %s", alt_num, string_desc);
@@ -97,7 +99,18 @@ static void on_hotplug_safe(usb_host_t* host, libusb_device *dev, libusb_hotplug
   struct libusb_device_descriptor dd = {};
   int ret;
   CHK_USB_ERR(libusb_get_device_descriptor, dev, &dd); if(ret != 0 ) return;
+  uint8_t string_desc[256] = {0};
+  if(event == LIBUSB_HOTPLUG_EVENT_DEVICE_ARRIVED){
+    libusb_device_handle* device_handle = NULL;
+    CHK_USB_ERR(libusb_open, dev, &device_handle);
+    if(device_handle){
+      libusb_get_string_descriptor_ascii(device_handle, dd.iProduct, string_desc, sizeof(string_desc));
+      libusb_close(device_handle);
+    }
+  }
+
   usb_dev_info_t info = {
+    .name = (const char*)string_desc,
     .dev = dev,
     .bus = bus,
     .addr = addr,
@@ -109,6 +122,7 @@ static void on_hotplug_safe(usb_host_t* host, libusb_device *dev, libusb_hotplug
   if(event == LIBUSB_HOTPLUG_EVENT_DEVICE_ARRIVED) print_desc(dev);
   #endif
 
+  if(dd.bDeviceClass != LIBUSB_CLASS_HUB)
   host->on_device(host, &info, event == LIBUSB_HOTPLUG_EVENT_DEVICE_ARRIVED);
 }
 

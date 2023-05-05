@@ -68,6 +68,7 @@ SET(libs_dir "${CMAKE_CURRENT_SOURCE_DIR}/libs")
 
 FILE(GLOB lib_dirs RELATIVE ${libs_dir} ${libs_dir}/*)
 FOREACH(lib_dir ${lib_dirs})
+  message("lib_dir ${lib_dir}")
   SET(dir ${libs_dir}/${lib_dir})
   IF(IS_DIRECTORY ${dir})
     file(GLOB_RECURSE ${lib_dir}_src CONFIGURE_DEPENDS "${dir}/*.c")
@@ -78,8 +79,8 @@ ENDFOREACH()
 target_link_libraries(usb PUBLIC ${LIBUSB_STATIC_LIB})
 target_include_directories(usb PUBLIC ${LIBUSB_INCLUDES})
 
-target_link_libraries(bthci PUBLIC usb)
+target_link_libraries(devices PUBLIC usb)
 
 add_executable(app "main.c")
 target_include_directories(app PUBLIC libs)
-target_link_libraries(app PUBLIC at cmux util nmea bthci)
+target_link_libraries(app PUBLIC at cmux util nmea devices)

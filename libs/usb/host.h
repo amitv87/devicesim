@@ -26,6 +26,7 @@ ENUM_TO_STR_FUNC(libusb_speed);
 typedef struct usb_host_s usb_host_t;
 
 typedef struct{
+  const char* name;
   libusb_device *dev;
   uint8_t bus, addr;
   uint16_t vid, pid;

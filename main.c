@@ -5,7 +5,8 @@
 #include <unistd.h>
 #include <at/engine.h>
 #include <nmea/generator.h>
-#include <bthci/dev_usb.h>
+#include <devices/hci_usb.h>
+#include <devices/serial_usb.h>
 
 #include "at_cmd.h"
 
@@ -108,6 +109,17 @@ static int on_hci_output(hci_usb_device_t* hci_dev, uint8_t* data, size_t length
   return io_write(transport->output_fd, data, length);
 }
 
+static void on_gsm_input(io_handle_t* handle, uint8_t fd_mode_mask){
+  int rc = read(handle->fd, io_rx_buff, sizeof(io_rx_buff));
+  if(rc > 0) serial_usb_device_input(handle->usr_data, io_rx_buff, rc);
+  else handle_read_error((transport_t*)handle, rc);
+}
+
+static int on_gsm_output(serial_usb_device_t* serial_dev, uint8_t* data, size_t length){
+  transport_t* transport = serial_dev->usr_data;
+  return io_write(transport->output_fd, data, length);
+}
+
 static at_engine_t engine = {0};
 
 #define SAT_INF(p,e,a,s) {.prn = p, .ele = e, .azi = a, .snr = s}
@@ -156,6 +168,7 @@ static nmea_gen_t nmea_gen = {
 };
 
 static hci_usb_device_t hci_dev = {};
+static serial_usb_device_t gsm_dev = {};
 
 static transport_t ate_transport = {
   .input_handle = {
@@ -189,6 +202,17 @@ static transport_t hci_transport = {
   .symlink_path = "/tmp/tty.bthci",
 };
 
+static transport_t gsm_transport = {
+  .input_handle = {
+    .fd_mode_mask = FD_READ | FD_EXCEPT,
+    .usr_data = &gsm_dev, .cb = on_gsm_input,
+  },
+  .name = "gsm0_device",
+  .tty_path = "/dev/ptmx",
+  .output_fd = -1, .baud = 0,
+  .symlink_path = "/tmp/tty.gsm0",
+};
+
 static usb_dev_info_t hci_devices[] = {
   {.vid = 0x2357, .pid = 0x0604}, // UB500
   {.vid = 0x8087, .pid = 0x0029}, // AX200
@@ -196,27 +220,38 @@ static usb_dev_info_t hci_devices[] = {
   {.vid = 0x0a12, .pid = 0x0001}, // CSR8510
 };
 
-static bool is_hci_device(usb_dev_info_t *dev_info){
-  for(int i = 0; i < countof(hci_devices); i++) if(dev_info->vid == hci_devices[i].vid && dev_info->pid == hci_devices[i].pid) return true;
+static usb_dev_info_t gsm_devices[] = {
+  {.vid = 0x2c7c, .pid = 0x0904}, // EC800G
+};
+
+static bool is_device_present(usb_dev_info_t *dev_info, usb_dev_info_t* devices, size_t count){
+  for(int i = 0; i < count; i++) if(dev_info->vid == devices[i].vid && dev_info->pid == devices[i].pid) return true;
   return false;
 }
 
 static void usb_on_device(usb_host_t* host, usb_dev_info_t *dev_info, bool added){
-  LOG("usb device %s, bus: %u, addr: %u, vid: 0x%04x, pid: 0x%04x", added ? "added" : "removed",
-    dev_info->bus, dev_info->addr, dev_info->vid, dev_info->pid);
+  LOG("%s bus: %u, addr: %u, vid: 0x%04x, pid: 0x%04x, name: %s", added ? "added" : "removed",
+    dev_info->bus, dev_info->addr, dev_info->vid, dev_info->pid, dev_info->name);
 
-  if(!is_hci_device(dev_info)) return;
-  bool rc = false;
-  if(added) rc = hci_usb_device_init(&hci_dev, dev_info);
-  else if(usb_device_match(&hci_dev.usb_device, dev_info)) rc = hci_usb_device_deinit(&hci_dev);
-  if(rc){LOG("hci device %s", added ? "online" : "offline");}
+  if(is_device_present(dev_info, hci_devices, countof(hci_devices))){
+    bool rc = false;
+    if(added) rc = hci_usb_device_init(&hci_dev, dev_info);
+    else if(usb_device_match(&hci_dev.usb_device, dev_info)) rc = hci_usb_device_deinit(&hci_dev);
+    if(rc){LOG("hci device %s", added ? "online" : "offline");}
+  }
+  if(is_device_present(dev_info, gsm_devices, countof(gsm_devices))){
+    bool rc = false;
+    if(added) rc = serial_usb_device_init(&gsm_dev, dev_info, 2);
+    else if(usb_device_match(&gsm_dev.usb_device, dev_info)) rc = serial_usb_device_deinit(&gsm_dev);
+    if(rc){LOG("serial device %s", added ? "online" : "offline");}
+  }
 }
 
 static usb_host_t usb_host = {
   .on_device = usb_on_device,
 };
 
-static transport_t* transports[] = {&ate_transport, &nmea_transport, &hci_transport};
+static transport_t* transports[] = {&ate_transport, &nmea_transport, &hci_transport, &gsm_transport};
 
 static void parse_args(int argc, char *argv[]){
   bool is_path = false, is_baud = false;
@@ -247,6 +282,10 @@ int main(int argc, char *argv[]){
   hci_dev.output = on_hci_output;
   hci_dev.usb_device.host = &usb_host;
 
+  gsm_dev.usr_data = &gsm_transport;
+  gsm_dev.output = on_gsm_output;
+  gsm_dev.usb_device.host = &usb_host;
+
   io_init_loop();
 
   for(int i = 0; i < countof(transports); i++) if(!setup_transport(transports[i])) return -1;
@@ -264,6 +303,7 @@ int main(int argc, char *argv[]){
   at_engine_stop(&engine);
   nmea_gen_stop(&nmea_gen);
   hci_usb_device_deinit(&hci_dev);
+  serial_usb_device_deinit(&gsm_dev);
   usb_host_deinit(&usb_host);
   usleep(10*1000);
   for(int i = 0; i < countof(transports); i++) close_transport(transports[i]);

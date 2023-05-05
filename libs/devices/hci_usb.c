@@ -1,4 +1,4 @@
-#include "dev_usb.h"
+#include "hci_usb.h"
 
 #define DEFAULT_HCI_IF_NO (0x00)
 
