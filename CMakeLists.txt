@@ -8,9 +8,8 @@ SET(CMAKE_C_FLAGS "-std=gnu11")
 SET(CMAKE_CXX_FLAGS "-std=gnu++11 -fno-rtti -fno-exceptions")
 SET(CMAKE_ASM_FLAGS "")
 
-project(gsmsim)
+project(devicesim)
 
-message("CMAKE_SYSTEM_NAME ${CMAKE_SYSTEM_NAME}")
 if(${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
   add_compile_options(-Wno-format -Wno-gnu-variable-sized-type-not-at-end -Wno-unknown-warning-option)
   SET(STRIP_FLAGS "-Wl,-dead_strip")
@@ -68,7 +67,6 @@ SET(libs_dir "${CMAKE_CURRENT_SOURCE_DIR}/libs")
 
 FILE(GLOB lib_dirs RELATIVE ${libs_dir} ${libs_dir}/*)
 FOREACH(lib_dir ${lib_dirs})
-  message("lib_dir ${lib_dir}")
   SET(dir ${libs_dir}/${lib_dir})
   IF(IS_DIRECTORY ${dir})
     file(GLOB_RECURSE ${lib_dir}_src CONFIGURE_DEPENDS "${dir}/*.c")
