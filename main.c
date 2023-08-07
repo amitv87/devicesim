@@ -10,6 +10,10 @@
 
 #include "at_cmd.h"
 
+/*
+./app -pa /dev/ptmx -pn /dev/ptmx
+*/
+
 typedef struct{
   io_handle_t input_handle;
   bool use_stdin;
@@ -82,9 +86,30 @@ static void on_ate_input(io_handle_t* handle, uint8_t fd_mode_mask){
   else handle_read_error((transport_t*)handle, rc);
 }
 
+static size_t point_idx = 0;
+static const float route[] = {
+  #include "loop_cbd.h"
+};
+
+static int get_random(int lower, int upper){
+  return (rand() % (upper - lower + 1)) + lower;
+}
+
 static void fetch_loc_info(nmea_gen_t *gen, float lat_lng[2]){
-  if(lat_lng[0] == 0) lat_lng[0] = 19.0051252, lat_lng[1] = 73.0332695;
-  else lat_lng[0] += 0.000001, lat_lng[1] += 0.000004;
+  lat_lng[0] = route[point_idx++], lat_lng[1] = route[point_idx++];
+  if(point_idx >= countof(route)) point_idx = 0;
+
+  for(int i = 0; i < countof(gen->sat_groups); i++){
+    const_sat_group_t* group = &gen->sat_groups[i];
+    for(int j = 0; j < group->max_count; j++){
+      sat_stat_t* sat = &group->sats[j];
+      if(sat->prn <= 0) break;
+      if(sat->snr <= 5) sat->snr = get_random(0, 6);
+      else sat->snr = get_random(sat->snr - 3, sat->snr + 3);
+      if(sat->snr >= 100) sat->snr = 0;
+      else if(sat->snr >= 50) sat->snr = 49;
+    }
+  }
 }
 
 static int on_nmea_output(nmea_gen_t *gen, char* sentence, size_t length){
@@ -287,6 +312,7 @@ int main(int argc, char *argv[]){
   gsm_dev.output = on_gsm_output;
   gsm_dev.usb_device.host = &usb_host;
 
+  srand(sys_now());
   io_init_loop();
 
   for(int i = 0; i < countof(transports); i++) if(!setup_transport(transports[i])) return -1;
