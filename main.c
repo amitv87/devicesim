@@ -222,6 +222,7 @@ static usb_dev_info_t hci_devices[] = {
 
 static usb_dev_info_t gsm_devices[] = {
   {.vid = 0x2c7c, .pid = 0x0904}, // EC800G
+  {.vid = 0x2c7c, .pid = 0x6026}, // L511
 };
 
 static bool is_device_present(usb_dev_info_t *dev_info, usb_dev_info_t* devices, size_t count){
@@ -241,7 +242,7 @@ static void usb_on_device(usb_host_t* host, usb_dev_info_t *dev_info, bool added
   }
   if(is_device_present(dev_info, gsm_devices, countof(gsm_devices))){
     bool rc = false;
-    if(added) rc = serial_usb_device_init(&gsm_dev, dev_info, 2);
+    if(added) rc = serial_usb_device_init(&gsm_dev, dev_info, dev_info->pid == 0x0904 ? 2 : 4);
     else if(usb_device_match(&gsm_dev.usb_device, dev_info)) rc = serial_usb_device_deinit(&gsm_dev);
     if(rc){LOG("serial device %s", added ? "online" : "offline");}
   }

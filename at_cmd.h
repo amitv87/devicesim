@@ -62,6 +62,8 @@ static modem_state_t mdm_state = {
 #include "at_cmd_defs.h"
 
 #define RET_DCE(x) return (at_cmd_raw_resp_t){.type = CMD_RES(DCE_RC), .value = DCE_RC(x)}
+#define RET_CME(x) return (at_cmd_raw_resp_t){.type = CMD_RES(CME_ERR), .value = CME_ERR(x)}
+#define RET_CMS(x) return (at_cmd_raw_resp_t){.type = CMD_RES(CMS_ERR), .value = CMS_ERR(x)}
 
 #define FUNC_IMPL(cmd, ...) FUNC_DECL(cmd){__VA_ARGS__; RET_DCE(OK);}
 
@@ -168,6 +170,59 @@ FUNC_IMPL(CCLK,{
     AT_OUTPUT_ARGS_LINE(ch, (char*)cmd->name, AT_SEP, QUOTE_STRING(tbuff))
   }
 
+})
+
+#define CRSM_CMD_READ_BINARY    176
+#define CRSM_CMD_READ_RECORD    178
+#define CRSM_CMD_GET_RESPONSE   192
+#define CRSM_CMD_UPDATE_BINARY  214
+#define CRSM_CMD_UPDATE_RECORD  220
+#define CRSM_CMD_STATUS         242
+#define CRSM_CMD_RETRIEVE_DATA  203
+#define CRSM_CMD_SET_DATA       219
+
+#define GSM_FILE_EF_SPN     0x6f46
+#define GSM_FILE_EF_ICCID   0x2fe2
+
+FUNC_IMPL(CRSM,{
+  IF_REQ(SET){
+
+    // AT+CRSM=176,28486,0,1,16
+    // +CRSM: 144,0,"566920496E646961FFFFFFFFFFFFFFFF"
+
+    if(!mdm_state.cpin) RET_CMS(SIM_NOT_INSERT);
+    if(result->args.argc <= 4) RET_CME(SIM_INVALID_PARAMETER);
+    // +CRSM=<command>[,<fileid>[,<P1>,<P2>,<P3>[,<data>[,<pathid>]]]]
+    int command = atoi(result->args.argv[0].value);
+    int file_id = atoi(result->args.argv[1].value);
+    int p1 = atoi(result->args.argv[2].value);
+    int p2 = atoi(result->args.argv[3].value);
+    int p3 = atoi(result->args.argv[4].value);
+
+    switch(command){
+      case CRSM_CMD_READ_BINARY:{
+        switch(file_id){
+          case GSM_FILE_EF_SPN:{
+            size_t spn_len = strlen(mdm_state.spn);
+            size_t idx = 0;
+            if(p2 == 0){
+              idx = 1;
+              snprintf(tbuff, sizeof(tbuff) - 1, "%02X", 0);
+            }
+            else p2 -= 1;
+            for(;idx < min(p3,17); idx++) snprintf(tbuff + idx*2, sizeof(tbuff) - 1 - idx*2, "%02X", p2 + idx < spn_len ? mdm_state.spn[p2 + idx] : 0xff);
+            tbuff[idx*2] = 0;
+            AT_OUTPUT_ARGS_LINE(ch, (char*)cmd->name, AT_SEP, "144,0,", QUOTE_STRING(tbuff))
+            break;
+          }
+          case GSM_FILE_EF_ICCID: break;
+          default: RET_CME(SIM_FILEID_NOT_FOUND);
+        }
+        break;
+      }
+      default: RET_CME(SIM_UNKNOW_COMMAND);
+    }
+  }
 })
 
 FUNC_IMPL(CMUX,{

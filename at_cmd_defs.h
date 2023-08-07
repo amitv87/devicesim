@@ -24,6 +24,8 @@ REG_CMD(CGREG,    "+", 1, 1, 1, 0)
 REG_CMD(CSQ,      "+", 1, 0, 0, 1)
 REG_CMD(CCLK,     "+", 1, 1, 1, 0)
 
+REG_CMD(CRSM,     "+", 1, 0, 1, 0)
+
 REG_CMD(CMUX,     "+", 1, 1, 1, 0)
 
 REG_CMD(CLAC,     "+", 0, 0, 0, 1)
