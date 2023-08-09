@@ -104,7 +104,6 @@ REG_SENTENCE(GSV, 19, /* Satellites in view
   NMEA_FIELD_SAT_STAT(3)
 )
 
-
 REG_SENTENCE(GST, 8, /* Pseudorange Noise Statistics
          1          2  3  4   5    6  7   8
          |          |  |  |   |    |  |   |

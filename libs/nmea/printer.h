@@ -132,6 +132,7 @@ FUNC_DECL(vdop){     // Vertical Dilution of precision
 }
 
 FUNC_DECL(qunk){
+  PRINT_FIELD("M");
 }
 FUNC_DECL(prn){      // Satellite ID or PRN number (leading zeros sent)
   const_sat_group_t* grp = &gen->sat_groups[t_type];

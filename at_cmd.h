@@ -127,14 +127,6 @@ FUNC_IMPL(CCID,{
   AT_OUTPUT_ARGS_LINE(ch, (char*)cmd->name, AT_SEP, tbuff)
 })
 
-FUNC_IMPL(CENG,{
-  IF_REQ(GET){
-    PRINT_BUFF("%u", mdm_state.eng)
-    AT_OUTPUT_ARGS_LINE(ch, (char*)cmd->name, AT_SEP, tbuff, ",0")
-  }
-  else IF_REQ(SET) mdm_state.eng = atoi(result->args.argv[0].value);
-})
-
 FUNC_IMPL(CTZU,{
   IF_REQ(GET){
     PRINT_BUFF("%u", mdm_state.ctzu)
@@ -166,7 +158,7 @@ FUNC_IMPL(CCLK,{
     struct tm tm;
     time_t now = clock_now()/1000;
     gmtime_r(&now, &tm);
-    PRINT_BUFF("%02d/%02d/%02d,%02d:%02d:%02d%+03d", tm.tm_year - 100, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec, 0);
+    PRINT_BUFF("%02d/%02d/%02d,%02d:%02d:%02d+%02d", tm.tm_year - 100, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec, 22);
     AT_OUTPUT_ARGS_LINE(ch, (char*)cmd->name, AT_SEP, QUOTE_STRING(tbuff))
   }
 
@@ -241,11 +233,6 @@ FUNC_IMPL(CLAC,{
     cmd = cmd->item.next;
   }
 })
-
-FUNC_IMPL(QGSN, return HANDLER_FUNC(CGSN)(AT_CMD_HANDLER_CALL_ARGS);)
-FUNC_IMPL(QSPN, return HANDLER_FUNC(CSPN)(AT_CMD_HANDLER_CALL_ARGS);)
-FUNC_IMPL(QENG, return HANDLER_FUNC(CENG)(AT_CMD_HANDLER_CALL_ARGS);)
-FUNC_IMPL(QCCID, return HANDLER_FUNC(CCID)(AT_CMD_HANDLER_CALL_ARGS);)
 
 FUNC_IMPL(CGATT,{
   IF_REQ(GET){
