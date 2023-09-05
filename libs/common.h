@@ -10,6 +10,7 @@
 #include "util/time.h"
 
 #define __PACKED__ __attribute__((__packed__))
+#define ASSERT_STRUCT_SIZE(x, y) _Static_assert(sizeof(x) == y, "invalid struct " #x)
 
 #define min(a,b)           \
 ({                         \

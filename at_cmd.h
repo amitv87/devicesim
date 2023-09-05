@@ -222,7 +222,13 @@ FUNC_IMPL(CMUX,{
     AT_OUTPUT_ARGS_LINE(ch, (char*)cmd->name, AT_SEP, "0")
   }
   else IF_REQ(SET){
-    if(ch->ch_id == 0) ch->engine->cmux.state = CMUX_STATE_PRE_INIT;
+    if(ch->ch_id == 0){
+      // AT+CMUX=[<mode>[,<subset>[,<port_speed>[,<N1>[,<T1>[,<N2>[,<T2>[,<T3>[,<k>]]]]]]]]]
+      int frame_size = result->args.argc >= 4 ? atoi(result->args.argv[3].value) : 127;
+      ch->engine->cmux.max_frame_size = min(frame_size, 1540);
+      LOG("argc: %zu, max_frame_size %zu", result->args.argc, ch->engine->cmux.max_frame_size);
+      ch->engine->cmux.state = CMUX_STATE_PRE_INIT;
+    }
   }
 })
 

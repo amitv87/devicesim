@@ -45,6 +45,13 @@ typedef union{
 } __PACKED__ cmux_address_t;
 
 typedef struct{
+  uint8_t  l_ea   : 1;
+  uint16_t length :15;
+  uint8_t  data[0];
+} __PACKED__ cmux_ext_ld_t;
+ASSERT_STRUCT_SIZE(cmux_ext_ld_t, 2);
+
+typedef struct{
   union{
     uint8_t address;
     struct{
@@ -54,18 +61,23 @@ typedef struct{
     };
   };
   uint8_t control;
-  // union{
-  //   struct{
-      uint8_t l_ea    : 1;
-      uint8_t length  : 7;
-      uint8_t data[];
-  //   } f0;
-  //   struct{
-  //     uint16_t length;
-  //     uint8_t data[];
-  //   } f1;
-  // };
+  union{
+    struct{
+      union{
+        struct{
+          uint8_t l_ea    : 1;
+          uint8_t length  : 7;
+        };
+        uint8_t __length;
+      };
+      union{
+        uint8_t data[0];
+      };
+    };
+    cmux_ext_ld_t ext[0];
+  };
 } __PACKED__ cmux_frame_t;
+ASSERT_STRUCT_SIZE(cmux_frame_t, 3);
 
 typedef struct{
   union{
@@ -81,21 +93,28 @@ typedef struct{
   uint8_t data[];
 } cmux_control_message_t;
 
+#define GET_DATA(frame) (frame->l_ea ? frame->data : frame->ext->data)
+#define GET_DLEN(frame) (frame->l_ea ? frame->length : frame->ext->length)
+#define GET_HLEN(frame) (sizeof(cmux_frame_t) + (frame->l_ea ? 0 : 1))
+#define GET_FLEN(frame) (GET_HLEN(frame) + GET_DLEN(frame) + 1)
+#define GET_CSUM(frame) (frame->l_ea ? frame->data[GET_DLEN(frame)] : frame->ext->data[GET_DLEN(frame)])
+
 static void send_frame(cmux_t *cmux, uint8_t channel, uint8_t frame_type, uint8_t* data, size_t length){
-  uint8_t buff[sizeof(cmux_frame_t) + 2 + 1];
+  uint8_t buff[1 + sizeof(cmux_frame_t) + (length <= 127 ? 0 : 1) + 1 + 1]; // sof + hdr + <ext> + csum + sof
   buff[0] = buff[sizeof(buff) - 1] = SOF_MARKER;
   cmux_frame_t* frame = (cmux_frame_t*)(buff + 1);
   frame->dlci = channel;
   frame->cr   = 1;
   frame->f_ea = 1;
   frame->control = frame_type | PF;
-  frame->l_ea = 1;
-  frame->length = length;
-  frame->data[0] = crc8(0, (uint8_t*)frame, sizeof(cmux_frame_t));
-  cmux->cb->tp_output(cmux, buff, length ? sizeof(cmux_frame_t) + 1 : sizeof(buff));
+  frame->l_ea = length <= 127 ? 1 : 0;
+  if(frame->l_ea) frame->length = length;
+  else frame->ext->length = length;
+  GET_DATA(frame)[0] = crc8(0, (uint8_t*)frame, GET_HLEN(frame));
+  cmux->cb->tp_output(cmux, buff, length ? GET_HLEN(frame) + 1 : sizeof(buff));
   if(!length) return;
   cmux->cb->tp_output(cmux, data, length);
-  cmux->cb->tp_output(cmux, buff + sizeof(cmux_frame_t) + 1, 2);
+  cmux->cb->tp_output(cmux, buff + GET_HLEN(frame) + 1, 2);
 }
 
 void cmux_init(cmux_t *cmux){
@@ -112,15 +131,18 @@ void cmux_tp_input(cmux_t *cmux, uint8_t* data, size_t length){
   retry:;
   bool got_frame = false;
   while(length && !got_frame){
+    uint8_t byte = data[0];
     if(cmux->is_recving_frame){
+      if(frame_buff->w_idx == 0 && byte == SOF_MARKER) goto skip_read;
       frame_buff->bytes[frame_buff->w_idx++] = data[0];
-      if(frame_buff->w_idx == sizeof(cmux_frame_t) + frame->length + 1) cmux->is_recving_frame = false;
+      if(frame_buff->w_idx == GET_FLEN(frame)) cmux->is_recving_frame = false;
     }
-    else if(data[0] == SOF_MARKER){
+    else if(byte == SOF_MARKER){
       if(frame_buff->w_idx) got_frame = true;
       else cmux->is_recving_frame = true;
       frame_buff->w_idx = 0;
     }
+    skip_read:
     data += 1, length -= 1;
   }
 
@@ -157,9 +179,9 @@ void cmux_tp_input(cmux_t *cmux, uint8_t* data, size_t length){
           cmux->channel_state[channel] = channel_state = CHANNEL_STATE_OPEN;
           if(channel) cmux->cb->on_event(cmux, channel, CMUX_CHANNEL_OPEN);
         }
-        if(channel) cmux->cb->ch_output(cmux, channel, frame->data, frame->length);
+        if(channel) cmux->cb->ch_output(cmux, channel, GET_DATA(frame), GET_DLEN(frame));
         else{
-          cmux_control_message_t* msg = (cmux_control_message_t*)frame->data;
+          cmux_control_message_t* msg = (cmux_control_message_t*)GET_DATA(frame);
           switch(msg->t_cmd){
             case CMD_MSC:{
               cmux_address_t* addr = (cmux_address_t*)msg->data;
@@ -178,7 +200,7 @@ void cmux_ch_input(cmux_t *cmux, size_t ch_id, uint8_t* data, size_t length){
   if(ch_id > countof(cmux->channel_state)) return;
   int olength = length;
   while(length > 0){
-    size_t to_send = 127;
+    size_t to_send = cmux->max_frame_size;
     if(length < to_send) to_send = length;
     send_frame(cmux, ch_id, FT_UIH, data, to_send);
     data += to_send;

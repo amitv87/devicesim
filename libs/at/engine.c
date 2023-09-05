@@ -122,9 +122,11 @@ static void on_cmd_line(line_reader_t *reader, char* data, size_t length){
 
             if(ch->engine->cmux.state == CMUX_STATE_PRE_INIT){
               cmux_t* cmux = &ch->engine->cmux;
+              size_t max_frame_size = cmux->max_frame_size;
               *cmux = (cmux_t){
                 .usr_data = ch->engine,
                 .cb = &cmux_cb,
+                .max_frame_size = max_frame_size,
               };
               cmux_init(cmux);
               ch->mode = AT_CH_MODE(CMUX);
@@ -211,6 +213,7 @@ static void pppd_input(at_channel_t* ch, uint8_t* data, size_t len){
 
 void at_engine_input(at_engine_t *engine, size_t ch_id, uint8_t* data, size_t len){
   // LOG("ch%zu %zu bytes -> %.*s", ch_id, len, (int)len, data);
+  // HDUMP(data, len, "at_engine_input");
   at_channel_t* ch = &engine->channels[ch_id];
   switch(ch->mode){
     case AT_CH_MODE(CMD): if(ch->echo) at_engine_output(engine, ch_id, data, len); line_reader_read(&ch->reader, data, len); break;

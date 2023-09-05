@@ -3,7 +3,7 @@
 
 #include "../common.h"
 
-#define CMUX_BUFF_SIZE (144) // 1(SOF) + 3(frame hdr) + (0-127)(data) + 1(FCS) + 1(SOF)
+#define CMUX_BUFF_SIZE (1600) // 1(SOF) + 3(frame hdr) + (0-127)(data) + 1(FCS) + 1(SOF)
 #define MAX_CHANNEL_COUNT (4)
 
 typedef enum{
@@ -35,6 +35,7 @@ typedef struct cmux_s{
   cmux_state state;
   cmux_cb_t* cb;
   void* usr_data;
+  size_t max_frame_size;
   bool is_recving_frame;
   uint8_t channel_state[MAX_CHANNEL_COUNT + 1];
   io_buff_t frame_buff;
