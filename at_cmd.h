@@ -207,7 +207,8 @@ FUNC_IMPL(CRSM,{
             AT_OUTPUT_ARGS_LINE(ch, (char*)cmd->name, AT_SEP, "144,0,", QUOTE_STRING(tbuff))
             break;
           }
-          case GSM_FILE_EF_ICCID: break;
+
+          case GSM_FILE_EF_ICCID: AT_OUTPUT_ARGS_LINE(ch, (char*)cmd->name, AT_SEP, "144,0,", "981929224030641040F2") break;
           default: RET_CME(SIM_FILEID_NOT_FOUND);
         }
         break;
