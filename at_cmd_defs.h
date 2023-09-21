@@ -13,10 +13,12 @@ REG_CMD(I,        "",  0, 0, 0, 1)
 REG_CMD(CBC,      "+", 1, 0, 0, 1)
 REG_CMD(CGSN,     "+", 0, 0, 0, 1)
 REG_CMD(CFUN,     "+", 1, 1, 1, 0)
+REG_CMD(CTZU,     "+", 1, 1, 1, 0)
+
 REG_CMD(CPIN,     "+", 1, 1, 1, 0)
 REG_CMD(CSPN,     "+", 0, 1, 0, 1)
 REG_CMD(CCID,     "+", 1, 0, 0, 1)
-REG_CMD(CTZU,     "+", 1, 1, 1, 0)
+REG_CMD(ICCID,    "+", 1, 0, 0, 1)
 
 REG_CMD(CREG,     "+", 1, 1, 1, 0)
 REG_CMD(CGREG,    "+", 1, 1, 1, 0)

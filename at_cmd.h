@@ -26,7 +26,7 @@ typedef struct{
 
   char* spn;
   uint64_t imei;
-  uint64_t ccid;
+  char ccid[21];
 
   pdp_context_t pdp_ctx[3];
 } modem_state_t;
@@ -45,7 +45,7 @@ static modem_state_t mdm_state = {
   .ctzu = 1,
   .spn = "airtel",
   .imei = 866897058905912,
-  .ccid = 8991922204034601042,
+  .ccid = "8991922204034601042F",
   .pdp_ctx = {
     {.typ = "IP", .apn = "internet1"},
     {.typ = "IPV4", .apn = "internet2"},
@@ -123,9 +123,11 @@ FUNC_IMPL(CPIN,{
 FUNC_IMPL(CSPN, AT_OUTPUT_ARGS_LINE(ch, (char*)cmd->name, AT_SEP, QUOTE_STRING((mdm_state.cpin ? mdm_state.spn : (char*)"")), ",0"))
 
 FUNC_IMPL(CCID,{
-  PRINT_BUFF("%llu", mdm_state.cpin ? mdm_state.ccid : 0)
+  PRINT_BUFF("%s", mdm_state.cpin ? mdm_state.ccid : "0")
   AT_OUTPUT_ARGS_LINE(ch, (char*)cmd->name, AT_SEP, tbuff)
 })
+
+FUNC_IMPL(ICCID, return HANDLER_FUNC(CCID)(AT_CMD_HANDLER_CALL_ARGS);)
 
 FUNC_IMPL(CTZU,{
   IF_REQ(GET){
@@ -178,10 +180,6 @@ FUNC_IMPL(CCLK,{
 
 FUNC_IMPL(CRSM,{
   IF_REQ(SET){
-
-    // AT+CRSM=176,28486,0,1,16
-    // +CRSM: 144,0,"566920496E646961FFFFFFFFFFFFFFFF"
-
     if(!mdm_state.cpin) RET_CMS(SIM_NOT_INSERT);
     if(result->args.argc <= 4) RET_CME(SIM_INVALID_PARAMETER);
     // +CRSM=<command>[,<fileid>[,<P1>,<P2>,<P3>[,<data>[,<pathid>]]]]
@@ -195,6 +193,10 @@ FUNC_IMPL(CRSM,{
       case CRSM_CMD_READ_BINARY:{
         switch(file_id){
           case GSM_FILE_EF_SPN:{
+            /*
+            AT+CRSM=176,28486,0,1,16
+            +CRSM: 144,0,"566920496E646961FFFFFFFFFFFFFFFF"
+            */
             size_t spn_len = strlen(mdm_state.spn);
             size_t idx = 0;
             if(p2 == 0){
@@ -207,8 +209,16 @@ FUNC_IMPL(CRSM,{
             AT_OUTPUT_ARGS_LINE(ch, (char*)cmd->name, AT_SEP, "144,0,", QUOTE_STRING(tbuff))
             break;
           }
-
-          case GSM_FILE_EF_ICCID: AT_OUTPUT_ARGS_LINE(ch, (char*)cmd->name, AT_SEP, "144,0,", "981929224030641040F2") break;
+          case GSM_FILE_EF_ICCID: {
+            /*
+            AT+CRSM=176,12258,0,0,10
+            +CRSM: 144,0,"981902000540635076F9"
+            */
+            for(int i = 0; i < 20; i++) tbuff[i] = mdm_state.ccid[i % 2 ? i - 1 : i + 1];
+            tbuff[20] = 0;
+            AT_OUTPUT_ARGS_LINE(ch, (char*)cmd->name, AT_SEP, "144,0,", QUOTE_STRING(tbuff))
+            break;
+          }
           default: RET_CME(SIM_FILEID_NOT_FOUND);
         }
         break;
