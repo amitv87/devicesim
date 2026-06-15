@@ -22,7 +22,7 @@ typedef struct serial_usb_device_s{
   };
   int8_t if_no;
   serial_output output;
-  uint8_t buff[1][2048];
+  uint8_t buff[1][20480];
 } serial_usb_device_t;
 
 bool serial_usb_device_init(serial_usb_device_t* serial_dev, usb_dev_info_t* info, uint8_t if_no);

@@ -131,16 +131,17 @@ static void on_hci_input(io_handle_t* handle, uint8_t fd_mode_mask){
 
 static int on_hci_output(hci_usb_device_t* hci_dev, uint8_t* data, size_t length){
   transport_t* transport = hci_dev->usr_data;
+  // hexdump(data, length, "on_hci_output: %u\r\n", length);
   return io_write(transport->output_fd, data, length);
 }
 
-static void on_gsm_input(io_handle_t* handle, uint8_t fd_mode_mask){
+static void on_serial_input(io_handle_t* handle, uint8_t fd_mode_mask){
   int rc = read(handle->fd, io_rx_buff, sizeof(io_rx_buff));
   if(rc > 0) serial_usb_device_input(handle->usr_data, io_rx_buff, rc);
   else handle_read_error((transport_t*)handle, rc);
 }
 
-static int on_gsm_output(serial_usb_device_t* serial_dev, uint8_t* data, size_t length){
+static int on_serial_output(serial_usb_device_t* serial_dev, uint8_t* data, size_t length){
   transport_t* transport = serial_dev->usr_data;
   return io_write(transport->output_fd, data, length);
 }
@@ -193,7 +194,7 @@ static nmea_gen_t nmea_gen = {
 };
 
 static hci_usb_device_t hci_dev = {};
-static serial_usb_device_t gsm_dev = {};
+static serial_usb_device_t gsm_dev = {}, gnss_dev = {};
 
 static transport_t ate_transport = {
   .input_handle = {
@@ -230,12 +231,31 @@ static transport_t hci_transport = {
 static transport_t gsm_transport = {
   .input_handle = {
     .fd_mode_mask = FD_READ | FD_EXCEPT,
-    .usr_data = &gsm_dev, .cb = on_gsm_input,
+    .usr_data = &gsm_dev, .cb = on_serial_input,
   },
   .name = "gsm0_device",
   .tty_path = "/dev/ptmx",
   .output_fd = -1, .baud = 0,
   .symlink_path = "/tmp/tty.gsm0",
+};
+
+static transport_t gnss_transport = {
+  .input_handle = {
+    .fd_mode_mask = FD_READ | FD_EXCEPT,
+    .usr_data = &gnss_dev, .cb = on_serial_input,
+  },
+  .name = "gnss0_device",
+  .tty_path = "/dev/ptmx",
+  .output_fd = -1, .baud = 0,
+  .symlink_path = "/tmp/tty.gnss0",
+};
+
+static transport_t* transports[] = {
+  &ate_transport,
+  &nmea_transport,
+  &hci_transport,
+  &gsm_transport,
+  &gnss_transport,
 };
 
 static usb_dev_info_t hci_devices[] = {
@@ -246,12 +266,31 @@ static usb_dev_info_t hci_devices[] = {
 };
 
 static usb_dev_info_t gsm_devices[] = {
-  {.vid = 0x2c7c, .pid = 0x0904}, // EC800G
-  {.vid = 0x2c7c, .pid = 0x6026}, // L511
+  {.vid = 0x2c7c, .pid = 0x0904, .int_val = 2}, // EC800G
+  {.vid = 0x2c7c, .pid = 0x6002, .int_val = 3}, // EC800M, EG800P AT
+  {.vid = 0x2c7c, .pid = 0x6007, .int_val = 2}, // EG800Q
+  {.vid = 0x2c7c, .pid = 0x6026, .int_val = 4}, // L511
+  {.vid = 0x2949, .pid = 0x7401, .int_val = 2}, // N706
+  {.vid = 0x1782, .pid = 0x4e00, .int_val = 2}, // Air724UG
+  {.vid = 0x2ecc, .pid = 0x3010, .int_val = 2}, // XQ800G
 };
 
+static usb_dev_info_t gnss_devices[] = {
+  {.vid = 0x2c7c, .pid = 0x6002, .int_val = 4}, // EC800M, EG800P GNSS
+  {.vid = 0x2c7c, .pid = 0x0904, .int_val = 7}, // EG800G GNSS
+  {.vid = 0x2c7c, .pid = 0x6007, .int_val = 3}, // EG800Q
+};
+
+typedef struct{
+  transport_t xport;
+  usb_dev_info_t usbd_info;
+} target_device_t;
+
 static bool is_device_present(usb_dev_info_t *dev_info, usb_dev_info_t* devices, size_t count){
-  for(int i = 0; i < count; i++) if(dev_info->vid == devices[i].vid && dev_info->pid == devices[i].pid) return true;
+  for(int i = 0; i < count; i++) if(dev_info->vid == devices[i].vid && dev_info->pid == devices[i].pid){
+    dev_info->int_val = devices[i].int_val;
+    return true;
+  }
   return false;
 }
 
@@ -261,23 +300,33 @@ static void usb_on_device(usb_host_t* host, usb_dev_info_t *dev_info, bool added
 
   if(is_device_present(dev_info, hci_devices, countof(hci_devices))){
     bool rc = false;
-    if(added) rc = hci_usb_device_init(&hci_dev, dev_info);
+    if(added){
+      rc = hci_usb_device_init(&hci_dev, dev_info);
+      if(rc){
+        uint8_t csr_warm_start[] = {
+          0x00, 0xFC, 0x13, 0xc2, 0x02, 0x00, 0x09, 0x00, 0x03, 0x0e, 0x02, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        };
+
+        // LOG("sending arm reset");
+        // hci_usb_device_input(&hci_dev, csr_warm_start, sizeof(csr_warm_start));
+      }
+    }
     else if(usb_device_match(&hci_dev.usb_device, dev_info)) rc = hci_usb_device_deinit(&hci_dev);
     if(rc){LOG("hci device %s", added ? "online" : "offline");}
   }
   if(is_device_present(dev_info, gsm_devices, countof(gsm_devices))){
     bool rc = false;
-    if(added) rc = serial_usb_device_init(&gsm_dev, dev_info, dev_info->pid == 0x0904 ? 2 : 4);
+    if(added) rc = serial_usb_device_init(&gsm_dev, dev_info, dev_info->int_val);
     else if(usb_device_match(&gsm_dev.usb_device, dev_info)) rc = serial_usb_device_deinit(&gsm_dev);
-    if(rc){LOG("serial device %s", added ? "online" : "offline");}
+    if(rc){LOG("gsm device %s", added ? "online" : "offline");}
+  }
+  if(is_device_present(dev_info, gnss_devices, countof(gnss_devices))){
+    bool rc = false;
+    if(added) rc = serial_usb_device_init(&gnss_dev, dev_info, dev_info->int_val);
+    else if(usb_device_match(&gnss_dev.usb_device, dev_info)) rc = serial_usb_device_deinit(&gnss_dev);
+    if(rc){LOG("gnss device %s", added ? "online" : "offline");}
   }
 }
-
-static usb_host_t usb_host = {
-  .on_device = usb_on_device,
-};
-
-static transport_t* transports[] = {&ate_transport, &nmea_transport, &hci_transport, &gsm_transport};
 
 static void parse_args(int argc, char *argv[]){
   bool is_path = false, is_baud = false;
@@ -301,6 +350,8 @@ static void parse_args(int argc, char *argv[]){
 int main(int argc, char *argv[]){
   parse_args(argc, argv);
 
+  usb_host_t usb_host = {.on_device = usb_on_device};
+
   engine.usr_data = &ate_transport;
   nmea_gen.usr_data = &nmea_transport;
 
@@ -309,8 +360,12 @@ int main(int argc, char *argv[]){
   hci_dev.usb_device.host = &usb_host;
 
   gsm_dev.usr_data = &gsm_transport;
-  gsm_dev.output = on_gsm_output;
+  gsm_dev.output = on_serial_output;
   gsm_dev.usb_device.host = &usb_host;
+
+  gnss_dev.usr_data = &gnss_transport;
+  gnss_dev.output = on_serial_output;
+  gnss_dev.usb_device.host = &usb_host;
 
   srand(sys_now());
   io_init_loop();

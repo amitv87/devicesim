@@ -1,6 +1,13 @@
 #include "engine.h"
+#include "../net/ra6d.h"
 #include <string.h>
 #include <unistd.h>
+
+/* The IPv6 prefix/interface ra6d advertises for the dialled PPP link. pppd
+ * creates ppp0 (first free unit) and negotiates the IPv4 pair below; ra6d adds
+ * the SLAAC /64 + return route that pppd's +ipv6 leaves out. */
+#define RA6D_IFNAME  "ppp0"
+#define RA6D_PREFIX  "fd00:cafe:1::"
 
 static const char* ch_modes[] = {
   #define REG_AT_CH_MODE(x, ...) #x,
@@ -17,6 +24,7 @@ static void reset_channel(at_channel_t* ch, at_ch_mode mode){
 
   if(ch->pppd.usr_data == ch){
     ch->pppd.usr_data = NULL;
+    ra6d_stop();   /* tear down the RA daemon with the PPP link it served */
     io_spawn_wait(&ch->pppd, true);
     #ifdef USE_PPPD_PTY
     io_dereg_handle(&ch->pppd_handle);
@@ -256,9 +264,11 @@ static void pppd_on_activity(io_spawn_t* pppd, io_std_type type, uint8_t* data, 
   at_channel_t* ch = pppd->usr_data;
   if(!ch) return;
   #ifdef USE_PPPD_PTY
-  data[size] = 0;
+  write(STDERR_FILENO, data, size);
+  // HDUMP(data, size, "pppd activity");
+  /*data[size] = 0;
   char* str = NULL;
-  if((str = strstr((char*)data, "local  IP address")) || (str = strstr((char*)data, "remote IP address"))) LOG("%s", str);
+  if((str = strstr((char*)data, "local  IP address")) || (str = strstr((char*)data, "remote IP address"))) LOG("%s", str);*/
   #else
   if(type == IO_STDOUT && ch->mode == AT_CH_MODE(DATA))
   at_engine_output(ch->engine, ch->ch_id, data, size);
@@ -311,14 +321,14 @@ bool at_engine_start_ppp_server(at_channel_t* ch, uint8_t ctx_id){
     "novj",
     "nocrtscts",
     "noauth",
-    "asyncmap",
-    "0",
-    "ipcp-accept-local",
-    "ipcp-accept-remote",
-    "netmask",
-    "255.255.255.0",
-    "ms-dns",
-    "8.8.8.8",
+    "asyncmap", "0",
+    "+ipv6",
+    "ipv6cp-use-ipaddr",
+    // "ipv6", "::1,::2",
+    // "ipcp-accept-local",
+    // "ipcp-accept-remote",
+    "netmask", "255.255.255.0",
+    "ms-dns", "8.8.8.8",
     "172.10.10.1:172.10.10.2",
     0
   };
@@ -344,6 +354,11 @@ bool at_engine_start_ppp_server(at_channel_t* ch, uint8_t ctx_id){
 
     io_reg_handle(&ch->pppd_handle);
     #endif
+
+    /* pppd is up — start the in-process RA daemon so the PPPoS client gets a
+     * SLAAC /64 + return route for the life of this link (stopped on teardown
+     * in reset_channel). */
+    ra6d_start(RA6D_IFNAME, RA6D_PREFIX);
   }
   else{
     #ifdef USE_PPPD_PTY

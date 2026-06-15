@@ -44,7 +44,8 @@ static modem_state_t mdm_state = {
   .cpin = 1,
   .ctzu = 1,
   .spn = "airtel",
-  .imei = 866897058905912,
+  .imei = 861100067527313,
+  // .imei = 866897058905912,
   .ccid = "8991922204034601042F",
   .pdp_ctx = {
     {.typ = "IP", .apn = "internet1"},

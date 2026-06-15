@@ -81,4 +81,8 @@ target_link_libraries(devices PUBLIC usb)
 
 add_executable(app "main.c")
 target_include_directories(app PUBLIC libs)
-target_link_libraries(app PUBLIC at cmux util nmea devices)
+target_link_libraries(app PUBLIC at cmux util nmea devices net)
+
+add_executable(sock "sock.c")
+target_include_directories(sock PUBLIC libs)
+target_link_libraries(sock PUBLIC util net)

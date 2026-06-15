@@ -120,7 +120,11 @@ bool hci_usb_device_init(hci_usb_device_t* hci_dev, usb_dev_info_t* info){
   hci_dev->rem_acl_bytes = hci_dev->rem_evt_bytes = 0;
 
   FUN_CHK(init_transfer, hci_dev, &hci_dev->tx_cmd, HCI_CMD, 0x00, -1);
-  FUN_CHK(init_transfer, hci_dev, &hci_dev->tx_acl, HCI_ACL, 0x02, -1);
+  if(!(init_transfer(hci_dev, &hci_dev->tx_acl, HCI_ACL, 0x02, -1) || init_transfer(hci_dev, &hci_dev->tx_acl, HCI_ACL, 0x04, -1))){
+    LOG("init_transfer failed");
+    goto end;
+  }
+  // FUN_CHK(init_transfer, hci_dev, &hci_dev->tx_acl, HCI_ACL, 0x02, -1);
   FUN_CHK(init_transfer, hci_dev, &hci_dev->rx_evt, HCI_EVT, 0x81, 0);
   FUN_CHK(init_transfer, hci_dev, &hci_dev->rx_acl, HCI_ACL, 0x82, 1);
 

@@ -30,6 +30,10 @@ typedef struct{
   libusb_device *dev;
   uint8_t bus, addr;
   uint16_t vid, pid;
+  union{
+    int int_val;
+    void* usr_data;
+  };
 } usb_dev_info_t;
 
 typedef struct{

@@ -57,7 +57,7 @@ static void print_desc(libusb_device *dev){
     PRINT_DESC(3, "Configuration[%u]: %s @ %umA", cf_num, string_desc, max_current);
     for(int if_num = 0; if_num < cdesc->bNumInterfaces; if_num++){
       uint8_t if_no = cdesc->interface[if_num].altsetting[0].bInterfaceNumber;
-      for(int i = if_num; i < if_no; i++) PRINT_DESC(5, "Interface[%d]: n/a", i);
+      for(int i = if_num; i < if_no; i++);// PRINT_DESC(5, "Interface[%d]: n/a", i);
       PRINT_DESC(5, "Interface[%d]: ", if_no);
       for(int alt_num = 0; alt_num < cdesc->interface[if_num].num_altsetting; alt_num++){
         IF_READ_STRING(cdesc->interface[if_num].altsetting[alt_num].iInterface){}

@@ -58,7 +58,7 @@ bool serial_usb_device_init(serial_usb_device_t* serial_dev, usb_dev_info_t* inf
     else if(tx_ep < 0) tx_ep = ep->num;
   }
 
-  LOG("rx_ep: %d, tx_ep: %d", rx_ep, tx_ep);
+  LOG("rx_ep: 0x%0x, tx_ep: 0x%0x", rx_ep, tx_ep);
 
   if(rx_ep >= 0 && tx_ep >= 0){
     FUN_CHK(init_transfer, serial_dev, &serial_dev->rx, rx_ep,  0);

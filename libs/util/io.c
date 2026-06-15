@@ -358,6 +358,12 @@ int io_tty_open(char* path, uint32_t baud_rate, char** slave_path){
     grantpt(fd);
     unlockpt(fd);
     chmod(*slave_path, S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH);
+
+    /*int pktmode = 1;
+    ret = ioctl(fd, TIOCPKT, &pktmode);
+    LOG("ioctl TIOCPKT: %d", ret);
+    LOG("isatty: %d", isatty(fd));
+    */
   }
   else fd = open(path, O_RDWR | O_NOCTTY | O_NONBLOCK);
   if(fd < 0) goto end;
