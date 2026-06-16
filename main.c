@@ -7,6 +7,9 @@
 #include <nmea/generator.h>
 #include <devices/hci_usb.h>
 #include <devices/serial_usb.h>
+#include <devices/wifi.h>
+#include <devices/wchip_sim.h>
+#include <devices/wchip_mt7601u.h>
 
 #include "at_cmd.h"
 
@@ -146,6 +149,17 @@ static int on_serial_output(serial_usb_device_t* serial_dev, uint8_t* data, size
   return io_write(transport->output_fd, data, length);
 }
 
+static void on_wifi_input(io_handle_t* handle, uint8_t fd_mode_mask){
+  int rc = read(handle->fd, io_rx_buff, sizeof(io_rx_buff));
+  if(rc > 0) wifi_dev_input(handle->usr_data, io_rx_buff, rc);
+  else handle_read_error((transport_t*)handle, rc);
+}
+
+static int on_wifi_output(wifi_dev_t* dev, uint8_t* data, size_t length){
+  transport_t* transport = dev->usr_data;
+  return io_write(transport->output_fd, data, length);
+}
+
 static at_engine_t engine = {0};
 
 #define SAT_INF(p,e,a,s) {.prn = p, .ele = e, .azi = a, .snr = s}
@@ -195,6 +209,9 @@ static nmea_gen_t nmea_gen = {
 
 static hci_usb_device_t hci_dev = {};
 static serial_usb_device_t gsm_dev = {}, gnss_dev = {};
+static wifi_dev_t wifi_dev = {};
+static wchip_sim_t wifi_sim = {};
+static wchip_mt7601u_t wifi_mt = {};
 
 static transport_t ate_transport = {
   .input_handle = {
@@ -250,12 +267,24 @@ static transport_t gnss_transport = {
   .symlink_path = "/tmp/tty.gnss0",
 };
 
+static transport_t wifi_transport = {
+  .input_handle = {
+    .fd_mode_mask = FD_READ | FD_EXCEPT,
+    .usr_data = &wifi_dev, .cb = on_wifi_input,
+  },
+  .name = "wifi0_device",
+  .tty_path = "/dev/ptmx",
+  .output_fd = -1, .baud = 0,
+  .symlink_path = "/tmp/tty.wifi",
+};
+
 static transport_t* transports[] = {
   &ate_transport,
   &nmea_transport,
   &hci_transport,
   &gsm_transport,
   &gnss_transport,
+  &wifi_transport,
 };
 
 static usb_dev_info_t hci_devices[] = {
@@ -279,6 +308,10 @@ static usb_dev_info_t gnss_devices[] = {
   {.vid = 0x2c7c, .pid = 0x6002, .int_val = 4}, // EC800M, EG800P GNSS
   {.vid = 0x2c7c, .pid = 0x0904, .int_val = 7}, // EG800G GNSS
   {.vid = 0x2c7c, .pid = 0x6007, .int_val = 3}, // EG800Q
+};
+
+static usb_dev_info_t wifi_devices[] = {
+  {.vid = 0x148f, .pid = 0x7601}, // MT7601U
 };
 
 typedef struct{
@@ -326,11 +359,23 @@ static void usb_on_device(usb_host_t* host, usb_dev_info_t *dev_info, bool added
     else if(usb_device_match(&gnss_dev.usb_device, dev_info)) rc = serial_usb_device_deinit(&gnss_dev);
     if(rc){LOG("gnss device %s", added ? "online" : "offline");}
   }
+  if(is_device_present(dev_info, wifi_devices, countof(wifi_devices))){
+    bool rc = false;
+    if(added){ // real radio takes over from the sim backend
+      wifi_dev_deinit(&wifi_dev);
+      rc = wifi_dev_init(&wifi_dev, &wifi_mt.base, dev_info);
+    }
+    else if(usb_device_match(&wifi_mt.usb_device, dev_info)){
+      wifi_dev_deinit(&wifi_dev);
+      rc = wifi_dev_init(&wifi_dev, &wifi_sim.base, NULL);
+    }
+    if(rc){LOG("wifi device %s", added ? "online (mt7601u)" : "offline (sim)");}
+  }
 }
 
 static void parse_args(int argc, char *argv[]){
   bool is_path = false, is_baud = false;
-  for(char c; (c = getopt(argc, argv, "pa:ba:pn:bn:ph:bh")) != -1;){
+  for(char c; (c = getopt(argc, argv, "pa:ba:pn:bn:ph:bhw:")) != -1;){
     transport_t* transport = NULL;
     switch (c){
       case 'p': is_path = true; continue;
@@ -338,6 +383,7 @@ static void parse_args(int argc, char *argv[]){
       case 'a': transport = &ate_transport; break;
       case 'h': transport = &hci_transport; break;
       case 'n': transport = &nmea_transport; break;
+      case 'w': transport = &wifi_transport; break;
       case '?': LOG("Unknown option: %c, %s", optopt, optarg); exit(1);
     }
     if(transport){
@@ -367,10 +413,19 @@ int main(int argc, char *argv[]){
   gnss_dev.output = on_serial_output;
   gnss_dev.usb_device.host = &usb_host;
 
+  wifi_dev.usr_data = &wifi_transport;
+  wifi_dev.output = on_wifi_output;
+  wifi_sim.base.ops = &wchip_sim_ops;
+  wifi_mt.base.ops = &wchip_mt7601u_ops;
+  wifi_mt.usb_device.host = &usb_host;
+
   srand(sys_now());
   io_init_loop();
 
   for(int i = 0; i < countof(transports); i++) if(!setup_transport(transports[i])) return -1;
+
+  // sim backend is live immediately; usb_on_device swaps in mt7601u if present
+  wifi_dev_init(&wifi_dev, &wifi_sim.base, NULL);
 
   usb_host_init(&usb_host);
   usb_host_start(&usb_host);
@@ -386,6 +441,7 @@ int main(int argc, char *argv[]){
   nmea_gen_stop(&nmea_gen);
   hci_usb_device_deinit(&hci_dev);
   serial_usb_device_deinit(&gsm_dev);
+  wifi_dev_deinit(&wifi_dev);
   usb_host_deinit(&usb_host);
   usleep(10*1000);
   for(int i = 0; i < countof(transports); i++) close_transport(transports[i]);
