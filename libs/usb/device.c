@@ -61,6 +61,18 @@ bool usb_device_close(usb_device_t* device){
   return rc;
 }
 
+bool usb_device_reset(usb_device_t* device){
+  bool rc = false;
+  if(!device->devh) goto end;
+  int ret;
+  // re-enumerates the device; clears a wedged interface (e.g. after an
+  // interrupted bring-up). LIBUSB_ERROR_NOT_FOUND means it re-enumerated.
+  CHK_USB_ERR(libusb_reset_device, device->devh);
+  rc = (ret == 0);
+  end:
+  return rc;
+}
+
 bool usb_device_claim_iface(usb_device_t* device, uint8_t idx){
   bool rc = false;
   if(!device->devh) goto end;
@@ -84,6 +96,27 @@ bool usb_device_release_iface(usb_device_t* device, uint8_t idx){
 bool usb_device_match(usb_device_t* device, usb_dev_info_t* info){
   if(!device->dev) return false;
   return is_device(device->dev, info);
+}
+
+int usb_device_control_transfer(usb_device_t* device, uint8_t request_type, uint8_t request,
+  uint16_t value, uint16_t index, uint8_t* data, uint16_t length, unsigned int timeout){
+  if(!device->devh) return LIBUSB_ERROR_NO_DEVICE;
+  int ret = libusb_control_transfer(device->devh, request_type, request, value, index, data, length, timeout);
+  if(ret < 0) LOG("libusb_control_transfer rt:0x%02x req:0x%02x val:0x%04x idx:0x%04x len:%u ret:%d err:%s",
+    request_type, request, value, index, length, ret, libusb_strerror(ret));
+  return ret;
+}
+
+int usb_device_bulk_transfer(usb_device_t* device, uint8_t endpoint,
+  uint8_t* data, int length, unsigned int timeout){
+  if(!device->devh) return LIBUSB_ERROR_NO_DEVICE;
+  int transferred = 0;
+  int ret = libusb_bulk_transfer(device->devh, endpoint, data, length, &transferred, timeout);
+  if(ret < 0){
+    LOG("libusb_bulk_transfer ep:0x%02x len:%d ret:%d err:%s", endpoint, length, ret, libusb_strerror(ret));
+    return ret;
+  }
+  return transferred;
 }
 
 int usb_device_find_eps(usb_device_t* device, uint8_t if_no, usb_device_endpoint_t eps[], size_t ep_count){
