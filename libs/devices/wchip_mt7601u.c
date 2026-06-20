@@ -235,6 +235,10 @@ static int  mt_rx_rssi(wchip_mt7601u_t* mt, const uint8_t* rxwi, uint16_t rate);
 static bool mt_set_channel(wchip_mt7601u_t* mt, uint8_t channel);
 static bool mt_mac_start(wchip_mt7601u_t* mt);
 static bool mt_tx_frame(wchip_mt7601u_t* mt, const uint8_t* frame, size_t frame_len);
+static void mt_scan_collect(wchip_mt7601u_t* mt, const uint8_t* frame, uint16_t mpdu_len, int8_t rssi);
+static void mt_conn_rx(wchip_mt7601u_t* mt, const uint8_t* frame, uint16_t len);   // auth/assoc resp
+static void mt_data_rx(wchip_mt7601u_t* mt, const uint8_t* frame, uint16_t len);   // 802.11 data → 802.3
+enum { MT_CONN_IDLE = 0, MT_CONN_AUTH, MT_CONN_ASSOC, MT_CONN_CONNECTED };
 #define MT7601U_RXWI_LEN 28
 
 /* Bulk IN completion: a frame off the air. Real driver strips the RXWI
@@ -259,17 +263,22 @@ static void on_rx(usb_transfer_t* transfer, uint8_t* data, size_t length){
     uint16_t rate = rxwi[10] | (rxwi[11] << 8);
     if(mpdu_len >= 10 && frame + mpdu_len <= p + seg){
       int rssi = mt_rx_rssi(mt, rxwi, rate);
-      // beacon (0x80) / probe-resp (0x50): decode SSID for verification
-      if(mpdu_len >= 38 && (frame[0] == 0x80 || frame[0] == 0x50)){
-        uint8_t* ie = frame + 36;  // 24B hdr + 12B (tsf+interval+caps)
-        if(ie[0] == 0 && (size_t)(38 + ie[1]) <= mpdu_len){
-          char ssid[33]; int sl = ie[1] > 32 ? 32 : ie[1];
-          memcpy(ssid, ie + 2, sl); ssid[sl] = 0;
-          LOG("mt7601u %s ch%u rssi:%d len:%u ssid:'%s'", frame[0] == 0x80 ? "BEACON" : "PROBE-RESP",
-            mt->channel, rssi, mpdu_len, ssid);
+      if(mt->scanning){
+        // active scan: collect beacons/probe-resps into results, don't flood the OS
+        if(mpdu_len >= 38 && (frame[0] == 0x80 || frame[0] == 0x50))
+          mt_scan_collect(mt, frame, mpdu_len, (int8_t)rssi);
+      } else if(mt->conn_state == MT_CONN_CONNECTED){
+        uint8_t type = frame[0] & 0x0c;          // 0x00 mgmt, 0x08 data
+        if(type == 0x08) mt_data_rx(mt, frame, mpdu_len);                 // data (incl EAPOL)
+        else if(frame[0] == 0xc0 || frame[0] == 0xa0){                    // deauth / disassoc
+          LOG("mt7601u: deauth/disassoc from AP"); mt->conn_state = MT_CONN_IDLE;
+          wifi_dev_on_disconnected(mt->base.dev, 0);
         }
+      } else if(mt->conn_state != MT_CONN_IDLE){
+        mt_conn_rx(mt, frame, mpdu_len);          // auth / assoc response
+      } else {
+        wifi_dev_on_rx_80211(mt->base.dev, frame, mpdu_len, mt->channel, (int8_t)rssi, rate);
       }
-      wifi_dev_on_rx_80211(mt->base.dev, frame, mpdu_len, mt->channel, (int8_t)rssi, rate);
     }
     p += seg, rem -= seg;
   }
@@ -1013,19 +1022,238 @@ static bool mt_op_set_channel(wifi_chip_t* chip, uint8_t channel){
   if(!mt_set_channel(mt, channel)) return false;
   return mt_mac_start(mt);  // (re)enable RX on the new channel
 }
-static bool mt_scan(wifi_chip_t* chip, wifi_scan_req_t* req){ LOG("mt7601u scan: OS-driven (tune channels + listen)"); return false; }
-static bool mt_connect(wifi_chip_t* chip, wifi_connect_req_t* req){ LOG("TODO mt7601u connect (auth+assoc)"); return false; }
-static bool mt_disconnect(wifi_chip_t* chip, uint8_t reason){ LOG("TODO mt7601u disconnect"); return false; }
-static bool mt_set_appie(wifi_chip_t* chip, uint8_t type, uint8_t* ie, size_t len){ LOG("TODO mt7601u set_appie"); return true; }
+/* Accumulate a beacon/probe-resp into the scan table (dedup by BSSID, keep strongest RSSI). */
+static void mt_scan_collect(wchip_mt7601u_t* mt, const uint8_t* frame, uint16_t mpdu_len, int8_t rssi){
+  if(mpdu_len < 38) return;
+  const uint8_t* bssid = frame + 16;              // 802.11 mgmt addr3 = BSSID
+  uint16_t capinfo = frame[34] | (frame[35] << 8);
+  const uint8_t* ies = frame + 36;                // after 24B hdr + tsf(8)+interval(2)+caps(2)
+  uint16_t avail = mpdu_len - 36;
+  uint16_t ie_len = 0;                            // trim FCS / trailing junk by walking TLVs
+  while(ie_len + 2 <= avail){
+    uint8_t l = ies[ie_len + 1];
+    if(ie_len + 2 + l > avail) break;
+    ie_len += 2 + l;
+  }
+  if(ie_len > sizeof mt->results[0].ies) ie_len = sizeof mt->results[0].ies;
+  // real channel = DS Parameter Set IE (id 3); async USB RX batching makes mt->channel unreliable
+  uint8_t ap_chan = mt->channel;
+  for(uint16_t q = 0; q + 2 <= ie_len; q += 2 + ies[q + 1]){
+    if(ies[q] == 3 && ies[q + 1] == 1){ ap_chan = ies[q + 2]; break; }
+  }
+  for(uint8_t i = 0; i < mt->n_results; i++){
+    if(memcmp(mt->results[i].bssid, bssid, 6) == 0){
+      if(rssi > mt->results[i].rssi) mt->results[i].rssi = rssi;
+      return;
+    }
+  }
+  if(mt->n_results >= countof(mt->results)) return;
+  struct mt_scan_result* r = &mt->results[mt->n_results++];
+  memcpy(r->bssid, bssid, 6);
+  r->channel = ap_chan; r->rssi = rssi; r->capinfo = capinfo;
+  memcpy(r->ies, ies, ie_len); r->ie_len = ie_len;
+}
+
+/* Emit the collected results to the OS as FullMAC scan results, then SCAN_DONE. */
+static void mt_scan_finish(wchip_mt7601u_t* mt){
+  mt->scanning = false;
+  io_rem_timer(&mt->scan_timer);
+  for(uint8_t i = 0; i < mt->n_results; i++){
+    struct mt_scan_result* r = &mt->results[i];
+    wifi_scan_result_t sr; memset(&sr, 0, sizeof sr);
+    memcpy(sr.bssid, r->bssid, 6);
+    sr.channel = r->channel; sr.rssi = r->rssi; sr.capinfo = r->capinfo;
+    wifi_dev_on_scan_result(mt->base.dev, &sr, r->ies, r->ie_len);
+  }
+  wifi_dev_on_scan_done(mt->base.dev);
+  LOG("mt7601u scan done: %u AP(s)", mt->n_results);
+}
+
+/* Per-channel dwell tick: collect happened during the dwell; advance or finish. */
+static void mt_scan_tick(io_timer_t* t){
+  wchip_mt7601u_t* mt = t->usr_data;
+  if(!mt->scanning) return;
+  if(mt->channel >= mt->scan_max_chan){ mt_scan_finish(mt); return; }
+  mt_set_channel(mt, (uint8_t)(mt->channel + 1));
+  mt_mac_start(mt);                                // re-enable RX on the new channel
+}
+
+/* Backend-owned active scan: hop channels, collect beacons, present FullMAC results. */
+static bool mt_scan(wifi_chip_t* chip, wifi_scan_req_t* req){
+  wchip_mt7601u_t* mt = MT(chip);
+  if(!mt->usb_device.usr_data) return false;
+  if(mt->scanning) return true;
+  mt->n_results = 0;
+  mt->scanning = true;
+  uint8_t start = (req && req->channel) ? req->channel : 1;
+  mt->scan_max_chan = (req && req->channel) ? req->channel : 13;
+  mt_set_channel(mt, start);
+  mt_mac_start(mt);
+  mt->scan_timer = (io_timer_t){ .repeat = true, .run_now = false,
+                                 .interval_ms = 120, .usr_data = mt, .cb = mt_scan_tick };
+  io_add_timer(&mt->scan_timer);
+  LOG("mt7601u scan: hopping ch%u..%u (120ms dwell)", start, mt->scan_max_chan);
+  return true;
+}
+/* ---- STA association MLME (open auth → assoc → CONNECTED) ---------------- */
+#define MT_MAC_ADDR_DW0  0x1008
+#define MT_MAC_ADDR_DW1  0x100c
+#define MT_MAC_BSSID_DW0 0x1010
+#define MT_MAC_BSSID_DW1 0x1014
+
+/* Harness STA MAC — programmed into the chip AND used by VayuOS pl_wifi as the netif hwaddr,
+ * so the supplicant's SPA (used in PTK derivation) matches what's on the air. */
+static const uint8_t STA_MAC[6] = { 0x02, 0x00, 0x00, 0x77, 0x66, 0x01 };
+
+static uint16_t mt_next_seq(wchip_mt7601u_t* mt){
+  uint16_t s = mt->tx_seq; mt->tx_seq = (uint16_t)((mt->tx_seq + 1) & 0xfff); return (uint16_t)(s << 4);
+}
+
+/* Fill the common 802.11 mgmt header (addr1=AP, addr2=STA, addr3=BSSID). */
+static size_t mt_hdr(wchip_mt7601u_t* mt, uint8_t* f, uint8_t fc0){
+  f[0] = fc0; f[1] = 0x00; f[2] = 0; f[3] = 0;
+  memcpy(f + 4,  mt->ap_bssid, 6);
+  memcpy(f + 10, STA_MAC, 6);
+  memcpy(f + 16, mt->ap_bssid, 6);
+  uint16_t sc = mt_next_seq(mt); f[22] = sc & 0xff; f[23] = sc >> 8;
+  return 24;
+}
+
+static void mt_send_auth(wchip_mt7601u_t* mt){
+  uint8_t f[30]; size_t n = mt_hdr(mt, f, 0xB0);   // auth
+  f[n++] = 0; f[n++] = 0;                            // algorithm = open
+  f[n++] = 1; f[n++] = 0;                            // transaction seq = 1
+  f[n++] = 0; f[n++] = 0;                            // status
+  LOG("mt7601u: TX auth-req -> %d", mt_tx_frame(mt, f, n));
+}
+
+static void mt_send_assoc(wchip_mt7601u_t* mt){
+  uint8_t f[160]; size_t n = mt_hdr(mt, f, 0x00);   // assoc-req
+  f[n++] = 0x11; f[n++] = 0x00;                      // capability: ESS | Privacy
+  f[n++] = 0x0a; f[n++] = 0x00;                      // listen interval
+  f[n++] = 0x00; f[n++] = mt->conn_ssid_len;         // SSID IE
+  memcpy(f + n, mt->conn_ssid, mt->conn_ssid_len); n += mt->conn_ssid_len;
+  f[n++] = 0x01; f[n++] = 0x04;                      // supported rates: 1,2,5.5,11 (basic)
+  f[n++] = 0x82; f[n++] = 0x84; f[n++] = 0x8b; f[n++] = 0x96;
+  if(mt->assoc_ie_len){ memcpy(f + n, mt->assoc_ie, mt->assoc_ie_len); n += mt->assoc_ie_len; }
+  LOG("mt7601u: TX assoc-req (rsn_ie:%uB) -> %d", mt->assoc_ie_len, mt_tx_frame(mt, f, n));
+}
+
+static void mt_conn_fail(wchip_mt7601u_t* mt, const char* why){
+  LOG("mt7601u: connect failed: %s", why);
+  io_rem_timer(&mt->conn_timer);
+  mt->conn_state = MT_CONN_IDLE;
+  wifi_dev_on_disconnected(mt->base.dev, 1);
+}
+
+static void mt_conn_tick(io_timer_t* t){
+  wchip_mt7601u_t* mt = t->usr_data;
+  if(++mt->conn_tries > 12){ mt_conn_fail(mt, "auth/assoc timeout"); return; }
+  if(mt->conn_state == MT_CONN_AUTH)       mt_send_auth(mt);
+  else if(mt->conn_state == MT_CONN_ASSOC) mt_send_assoc(mt);
+  else io_rem_timer(&mt->conn_timer);
+}
+
+/* Handle an inbound mgmt frame while authenticating/associating. */
+static void mt_conn_rx(wchip_mt7601u_t* mt, const uint8_t* f, uint16_t len){
+  if(len < 28 || memcmp(f + 10, mt->ap_bssid, 6) != 0) return;   // must be from our AP
+  if(mt->conn_state == MT_CONN_AUTH && f[0] == 0xB0){            // auth response
+    uint16_t status = f[28] | (f[29] << 8);
+    if(status != 0){ char b[32]; snprintf(b, sizeof b, "auth status %u", status); mt_conn_fail(mt, b); return; }
+    LOG("mt7601u: auth OK → assoc");
+    mt->conn_state = MT_CONN_ASSOC; mt->conn_tries = 0;
+    mt_send_assoc(mt);
+  } else if(mt->conn_state == MT_CONN_ASSOC && (f[0] == 0x10)){  // assoc response
+    uint16_t status = f[26] | (f[27] << 8);
+    if(status != 0){ char b[32]; snprintf(b, sizeof b, "assoc status %u", status); mt_conn_fail(mt, b); return; }
+    uint16_t aid = (uint16_t)((f[28] | (f[29] << 8)) & 0x3fff);
+    LOG("mt7601u: ASSOCIATED (aid=%u) — link up, awaiting 4-way", aid);
+    io_rem_timer(&mt->conn_timer);
+    mt->conn_state = MT_CONN_CONNECTED;
+    wifi_dev_on_connect(mt->base.dev, mt->ap_bssid);
+    wifi_dev_on_connected(mt->base.dev, mt->ap_bssid);
+  }
+}
+
+/* Inbound 802.11 data → 802.3 → generic layer (which routes EAPOL by ethertype). */
+static void mt_data_rx(wchip_mt7601u_t* mt, const uint8_t* f, uint16_t len){
+  bool qos = (f[0] & 0xf0) == 0x80;
+  size_t hdr = 24u + (qos ? 2u : 0u);
+  if(len < hdr + 8) return;
+  const uint8_t* snap = f + hdr;                        // LLC/SNAP AA AA 03 00 00 00 <etype>
+  if(snap[0] != 0xAA || snap[1] != 0xAA || snap[2] != 0x03) return;
+  const uint8_t* da = f + 4;                            // FromDS: addr1=DA(us)
+  const uint8_t* sa = f + 16;                           //         addr3=SA
+  size_t payload = len - hdr - 8;
+  uint8_t eth[1600];
+  if(14 + payload > sizeof eth) return;
+  memcpy(eth, da, 6); memcpy(eth + 6, sa, 6);
+  eth[12] = snap[6]; eth[13] = snap[7];
+  memcpy(eth + 14, snap + 8, payload);
+  wifi_dev_on_rx_data(mt->base.dev, eth, 14 + payload);
+}
+
+static bool mt_connect(wifi_chip_t* chip, wifi_connect_req_t* req){
+  wchip_mt7601u_t* mt = MT(chip);
+  if(!mt->usb_device.usr_data) return false;
+  if(mt->scanning){ mt->scanning = false; io_rem_timer(&mt->scan_timer); }
+  memcpy(mt->ap_bssid, req->bssid, 6);
+  mt->conn_ssid_len = req->ssid_len > 32 ? 32 : req->ssid_len;
+  memcpy(mt->conn_ssid, req->ssid, mt->conn_ssid_len); mt->conn_ssid[mt->conn_ssid_len] = 0;
+  uint8_t ch = req->channel ? req->channel : mt->channel;
+  mt_set_channel(mt, ch);
+  mt_mac_start(mt);
+  // program STA identity + BSS so the HW ACKs the AP (and the AP ACKs us)
+  mt_wr(mt, MT_MAC_ADDR_DW0,  STA_MAC[0] | (STA_MAC[1]<<8) | (STA_MAC[2]<<16) | ((uint32_t)STA_MAC[3]<<24));
+  mt_wr(mt, MT_MAC_ADDR_DW1,  STA_MAC[4] | (STA_MAC[5]<<8));
+  mt_wr(mt, MT_MAC_BSSID_DW0, req->bssid[0] | (req->bssid[1]<<8) | (req->bssid[2]<<16) | ((uint32_t)req->bssid[3]<<24));
+  mt_wr(mt, MT_MAC_BSSID_DW1, req->bssid[4] | (req->bssid[5]<<8));
+  mt->conn_state = MT_CONN_AUTH; mt->conn_tries = 0;
+  mt_send_auth(mt);
+  mt->conn_timer = (io_timer_t){ .repeat = true, .run_now = false, .interval_ms = 300,
+                                 .usr_data = mt, .cb = mt_conn_tick };
+  io_add_timer(&mt->conn_timer);
+  LOG("mt7601u: connecting '%s' ch%u %02x:%02x:%02x:%02x:%02x:%02x", mt->conn_ssid, ch,
+      req->bssid[0],req->bssid[1],req->bssid[2],req->bssid[3],req->bssid[4],req->bssid[5]);
+  return true;
+}
+
+static bool mt_disconnect(wifi_chip_t* chip, uint8_t reason){
+  wchip_mt7601u_t* mt = MT(chip); (void)reason;
+  if(mt->conn_state != MT_CONN_IDLE) io_rem_timer(&mt->conn_timer);
+  mt->conn_state = MT_CONN_IDLE;
+  return true;
+}
+
+static bool mt_set_appie(wifi_chip_t* chip, uint8_t type, uint8_t* ie, size_t len){
+  wchip_mt7601u_t* mt = MT(chip);
+  if(type == WIFI_APPIE_RSN && len <= sizeof mt->assoc_ie){ memcpy(mt->assoc_ie, ie, len); mt->assoc_ie_len = (uint8_t)len; }
+  LOG("mt7601u set_appie type:%u len:%zu", type, len);
+  return true;
+}
 static bool mt_set_key(wifi_chip_t* chip, wifi_key_t* k, uint8_t* key){ LOG("TODO mt7601u set_key (hw cipher)"); return false; }
 static bool mt_set_igtk(wifi_chip_t* chip, wifi_igtk_t* igtk){ return false; }
 static bool mt_send_mgmt(wifi_chip_t* chip, wifi_mgmt_tx_t* m, uint8_t* frame, size_t len){ LOG("TODO mt7601u send_mgmt"); return false; }
 static bool mt_config_done(wifi_chip_t* chip){ return true; }
 
+/* Outbound 802.3 (EAPOL/data from the OS) → 802.11 data frame (ToDS) + LLC/SNAP. */
 static bool mt_tx_data(wifi_chip_t* chip, uint8_t* eth, size_t len){
-  // 802.3 path needs 802.11 header synthesis; the OS uses the raw80211 plane.
-  LOG("mt7601u tx_data: use raw80211 plane in monitor/SoftMAC mode (%zu)", len);
-  return false;
+  wchip_mt7601u_t* mt = MT(chip);
+  if(mt->conn_state != MT_CONN_CONNECTED || len < 14) return false;
+  uint8_t f[2048]; size_t n = 0;
+  f[0] = 0x08; f[1] = 0x01;                 // data, ToDS=1
+  f[2] = 0; f[3] = 0;
+  memcpy(f + 4,  mt->ap_bssid, 6);          // addr1 = BSSID (RA)
+  memcpy(f + 10, STA_MAC, 6);               // addr2 = SA (TA)
+  memcpy(f + 16, eth, 6);                    // addr3 = DA (the 802.3 dst)
+  uint16_t sc = mt_next_seq(mt); f[22] = sc & 0xff; f[23] = sc >> 8;
+  n = 24;
+  f[n++] = 0xAA; f[n++] = 0xAA; f[n++] = 0x03; f[n++] = 0x00; f[n++] = 0x00; f[n++] = 0x00;
+  f[n++] = eth[12]; f[n++] = eth[13];        // ethertype (0x888E for EAPOL)
+  size_t payload = len - 14;
+  if(n + payload > sizeof f) return false;
+  memcpy(f + n, eth + 14, payload); n += payload;
+  return mt_tx_frame(mt, f, n);
 }
 static bool mt_op_tx_raw80211(wifi_chip_t* chip, uint8_t* frame, size_t len){
   wchip_mt7601u_t* mt = MT(chip);

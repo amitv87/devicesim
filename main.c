@@ -212,6 +212,7 @@ static serial_usb_device_t gsm_dev = {}, gnss_dev = {};
 static wifi_dev_t wifi_dev = {};
 static wchip_sim_t wifi_sim = {};
 static wchip_mt7601u_t wifi_mt = {};
+static bool wifi_sim_only = false; // -s: ignore a real radio, stay on wchip_sim
 
 static transport_t ate_transport = {
   .input_handle = {
@@ -359,7 +360,7 @@ static void usb_on_device(usb_host_t* host, usb_dev_info_t *dev_info, bool added
     else if(usb_device_match(&gnss_dev.usb_device, dev_info)) rc = serial_usb_device_deinit(&gnss_dev);
     if(rc){LOG("gnss device %s", added ? "online" : "offline");}
   }
-  if(is_device_present(dev_info, wifi_devices, countof(wifi_devices))){
+  if(!wifi_sim_only && is_device_present(dev_info, wifi_devices, countof(wifi_devices))){
     bool rc = false;
     if(added){ // real radio takes over from the sim backend
       wifi_dev_deinit(&wifi_dev);
@@ -375,11 +376,12 @@ static void usb_on_device(usb_host_t* host, usb_dev_info_t *dev_info, bool added
 
 static void parse_args(int argc, char *argv[]){
   bool is_path = false, is_baud = false;
-  for(char c; (c = getopt(argc, argv, "pa:ba:pn:bn:ph:bhw:")) != -1;){
+  for(char c; (c = getopt(argc, argv, "pa:ba:pn:bn:ph:bhw:s")) != -1;){
     transport_t* transport = NULL;
     switch (c){
       case 'p': is_path = true; continue;
       case 'b': is_baud = true; continue;
+      case 's': wifi_sim_only = true; continue;
       case 'a': transport = &ate_transport; break;
       case 'h': transport = &hci_transport; break;
       case 'n': transport = &nmea_transport; break;
