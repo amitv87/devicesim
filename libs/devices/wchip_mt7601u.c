@@ -1,6 +1,7 @@
 #include <unistd.h>
 #include "wchip_mt7601u.h"
 #include "mt7601u_fw_bin.h"
+#include "ccmp.h"
 
 #define MT(chip) ((wchip_mt7601u_t*)(chip))
 #define MT_IFACE 0
@@ -287,6 +288,7 @@ static void on_rx(usb_transfer_t* transfer, uint8_t* data, size_t length){
 static bool mt_init(wifi_chip_t* chip, usb_dev_info_t* info){
   wchip_mt7601u_t* mt = MT(chip);
   bool rc = false;
+  LOG("mt7601u: ccmp selftest %s", ccmp_selftest() == 0 ? "PASS" : "FAIL");
   if(mt->usb_device.usr_data) goto end;
   void* host = mt->usb_device.host;
   mt->usb_device = (usb_device_t){0};
@@ -1005,8 +1007,14 @@ static bool mt_tx_frame(wchip_mt7601u_t* mt, const uint8_t* frame, size_t frame_
   txwi[6] = frame_len & 0xff;               // len_ctl byte_cnt (12 bits)
   txwi[7] = (frame_len >> 8) & 0x0f;
   memcpy(buf + 4 + MT7601U_TXWI_LEN, frame, frame_len);
-  int rc = usb_device_bulk_transfer(&mt->usb_device, mt->data_tx_ep, buf, total, 500);
-  if(rc < 0) LOG("mt7601u tx_frame failed: %d", rc);
+  int rc = -1;
+  for(int try = 0; try < 6; try++){              // -6 EBUSY is transient (endpoint mid-transfer)
+    rc = usb_device_bulk_transfer(&mt->usb_device, mt->data_tx_ep, buf, total, 500);
+    if(rc >= 0) break;
+    if(rc != -6){ LOG("mt7601u tx_frame failed: %d", rc); break; }
+    usleep(1000);
+  }
+  if(rc == -6) LOG("mt7601u tx_frame: EBUSY after retries");
   return rc >= 0;
 }
 
@@ -1148,7 +1156,7 @@ static void mt_conn_fail(wchip_mt7601u_t* mt, const char* why){
 
 static void mt_conn_tick(io_timer_t* t){
   wchip_mt7601u_t* mt = t->usr_data;
-  if(++mt->conn_tries > 12){ mt_conn_fail(mt, "auth/assoc timeout"); return; }
+  if(++mt->conn_tries > 5){ mt_conn_fail(mt, "auth/assoc timeout"); return; }
   if(mt->conn_state == MT_CONN_AUTH)       mt_send_auth(mt);
   else if(mt->conn_state == MT_CONN_ASSOC) mt_send_assoc(mt);
   else io_rem_timer(&mt->conn_timer);
@@ -1175,16 +1183,29 @@ static void mt_conn_rx(wchip_mt7601u_t* mt, const uint8_t* f, uint16_t len){
   }
 }
 
-/* Inbound 802.11 data → 802.3 → generic layer (which routes EAPOL by ethertype). */
+/* Inbound 802.11 data → (decrypt if Protected) → 802.3 → generic layer (routes EAPOL by ethertype). */
 static void mt_data_rx(wchip_mt7601u_t* mt, const uint8_t* f, uint16_t len){
   bool qos = (f[0] & 0xf0) == 0x80;
   size_t hdr = 24u + (qos ? 2u : 0u);
   if(len < hdr + 8) return;
-  const uint8_t* snap = f + hdr;                        // LLC/SNAP AA AA 03 00 00 00 <etype>
-  if(snap[0] != 0xAA || snap[1] != 0xAA || snap[2] != 0x03) return;
-  const uint8_t* da = f + 4;                            // FromDS: addr1=DA(us)
-  const uint8_t* sa = f + 16;                           //         addr3=SA
-  size_t payload = len - hdr - 8;
+  const uint8_t* da = f + 4;                            // FromDS: addr1=DA(us), addr3=SA
+  const uint8_t* sa = f + 16;
+  uint8_t body[1600]; const uint8_t* snap; size_t snap_len;
+  if(f[1] & 0x40){                                      // Protected → CCMP decrypt
+    const uint8_t* key = (da[0] & 1) ? mt->gtk : mt->tk;   // group key for mcast/bcast, else pairwise
+    if((da[0] & 1) ? !mt->gtk_set : !mt->tk_set) return;
+    int pl = ccmp_decrypt(key, f, hdr, qos, f + hdr, len - hdr, body);
+    if(pl < 0){
+      if(!(da[0] & 1)) LOG("mt7601u: CCMP decrypt FAILED (pairwise, to us!)");  // only flag unicast-to-us
+      return;
+    }
+    snap = body; snap_len = (size_t)pl;
+    if(!(da[0] & 1)) LOG("mt7601u RX data (pairwise, to us) %u B etype:0x%02x%02x", (unsigned)pl, snap[6], snap[7]);
+  } else {
+    snap = f + hdr; snap_len = len - hdr;
+  }
+  if(snap_len < 8 || snap[0] != 0xAA || snap[1] != 0xAA || snap[2] != 0x03) return;
+  size_t payload = snap_len - 8;
   uint8_t eth[1600];
   if(14 + payload > sizeof eth) return;
   memcpy(eth, da, 6); memcpy(eth + 6, sa, 6);
@@ -1219,9 +1240,15 @@ static bool mt_connect(wifi_chip_t* chip, wifi_connect_req_t* req){
 }
 
 static bool mt_disconnect(wifi_chip_t* chip, uint8_t reason){
-  wchip_mt7601u_t* mt = MT(chip); (void)reason;
-  if(mt->conn_state != MT_CONN_IDLE) io_rem_timer(&mt->conn_timer);
+  wchip_mt7601u_t* mt = MT(chip);
+  if(mt->conn_state != MT_CONN_IDLE){
+    io_rem_timer(&mt->conn_timer);
+    uint8_t f[26]; size_t n = mt_hdr(mt, f, 0xC0);   // deauth — free our slot at the AP
+    f[n++] = reason ? reason : 3; f[n++] = 0;
+    mt_tx_frame(mt, f, n);
+  }
   mt->conn_state = MT_CONN_IDLE;
+  mt->tk_set = mt->gtk_set = false;
   return true;
 }
 
@@ -1231,7 +1258,14 @@ static bool mt_set_appie(wifi_chip_t* chip, uint8_t type, uint8_t* ie, size_t le
   LOG("mt7601u set_appie type:%u len:%zu", type, len);
   return true;
 }
-static bool mt_set_key(wifi_chip_t* chip, wifi_key_t* k, uint8_t* key){ LOG("TODO mt7601u set_key (hw cipher)"); return false; }
+static bool mt_set_key(wifi_chip_t* chip, wifi_key_t* k, uint8_t* key){
+  wchip_mt7601u_t* mt = MT(chip);
+  if(k->key_len != 16){ LOG("mt7601u set_key: unexpected key_len %u", k->key_len); return false; }
+  if(k->key_flag & WIFI_KEY_FLAG_PAIRWISE){ memcpy(mt->tk, key, 16); mt->tk_set = true; mt->tx_pn = 1; }
+  else if(k->key_flag & WIFI_KEY_FLAG_GROUP){ memcpy(mt->gtk, key, 16); mt->gtk_idx = k->key_idx; mt->gtk_set = true; }
+  LOG("mt7601u set_key %s idx:%u (sw CCMP)", (k->key_flag & WIFI_KEY_FLAG_PAIRWISE) ? "pairwise" : "group", k->key_idx);
+  return true;
+}
 static bool mt_set_igtk(wifi_chip_t* chip, wifi_igtk_t* igtk){ return false; }
 static bool mt_send_mgmt(wifi_chip_t* chip, wifi_mgmt_tx_t* m, uint8_t* frame, size_t len){ LOG("TODO mt7601u send_mgmt"); return false; }
 static bool mt_config_done(wifi_chip_t* chip){ return true; }
@@ -1253,7 +1287,21 @@ static bool mt_tx_data(wifi_chip_t* chip, uint8_t* eth, size_t len){
   size_t payload = len - 14;
   if(n + payload > sizeof f) return false;
   memcpy(f + n, eth + 14, payload); n += payload;
-  return mt_tx_frame(mt, f, n);
+  // CCMP-encrypt data once the PTK is installed; EAPOL (the 4-way) always goes in the clear.
+  uint16_t etype = (uint16_t)((eth[12] << 8) | eth[13]);
+  if(mt->tk_set && etype != 0x888E){
+    uint8_t enc[2048];
+    size_t body = n - 24;                    // LLC/SNAP + payload (the MPDU body)
+    size_t outn = ccmp_encrypt(mt->tk, f, 24, false, mt->tx_pn, 0, f + 24, body, enc);
+    bool ok = mt_tx_frame(mt, enc, outn);
+    LOG("mt7601u TX data etype:0x%04x dst:%02x:%02x:%02x:%02x:%02x:%02x enc pn:%llu -> %d",
+        etype, eth[0],eth[1],eth[2],eth[3],eth[4],eth[5], (unsigned long long)mt->tx_pn, ok);
+    mt->tx_pn++;
+    return ok;
+  }
+  bool ok = mt_tx_frame(mt, f, n);
+  LOG("mt7601u TX data etype:0x%04x (clear) -> %d", etype, ok);
+  return ok;
 }
 static bool mt_op_tx_raw80211(wifi_chip_t* chip, uint8_t* frame, size_t len){
   wchip_mt7601u_t* mt = MT(chip);

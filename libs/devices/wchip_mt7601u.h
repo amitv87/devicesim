@@ -48,6 +48,13 @@ typedef struct{
   uint16_t   tx_seq;          // 802.11 sequence number generator
   io_timer_t conn_timer;      // auth/assoc retry + timeout
   uint8_t    conn_tries;
+  // software CCMP (monitor-mode radio has no HW cipher) — keys from set_key
+  uint8_t    tk[16];          // pairwise (PTK TK)
+  bool       tk_set;
+  uint8_t    gtk[16];         // group key
+  uint8_t    gtk_idx;
+  bool       gtk_set;
+  uint64_t   tx_pn;           // CCMP packet number (TX)
   // active scan: backend channel-hop + beacon collect → SCAN_RESULT (FullMAC-presented).
   bool       scanning;
   uint8_t    scan_max_chan;   // last channel to dwell (req->channel or 13)
