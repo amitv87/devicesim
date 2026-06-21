@@ -52,6 +52,7 @@ typedef enum{
   WIFI_CMD_SAE_MSG      = 0x09, // wifi_sae_t + body    (reply to WIFI_EV_SAE_BUILD)
   WIFI_CMD_CONFIG_DONE  = 0x0A, // empty                (wpa_config_done: profile ready)
   WIFI_CMD_SET_CHANNEL  = 0x0B, // u8 channel           (monitor/SoftMAC tuning)
+  WIFI_CMD_RESET        = 0x0C, // empty: clear radio state (deauth, keys, scan) — OS startup
 } wifi_cmd_t;
 
 /* CTRL ops: devicesim -> OS (up-calls, the wpa_funcs callback analogs) */

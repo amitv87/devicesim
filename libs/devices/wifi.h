@@ -63,6 +63,7 @@ typedef struct wifi_chip_s wifi_chip_t;
 typedef struct{
   bool (*init)(wifi_chip_t* chip, usb_dev_info_t* info); // info NULL for sim
   bool (*deinit)(wifi_chip_t* chip);
+  bool (*reset)(wifi_chip_t* chip);                      // clear radio state (deauth/keys/scan)
   bool (*set_mode)(wifi_chip_t* chip, uint8_t mode);
   bool (*set_channel)(wifi_chip_t* chip, uint8_t channel);
   bool (*scan)(wifi_chip_t* chip, wifi_scan_req_t* req);

@@ -1169,8 +1169,9 @@ static void mt_conn_rx(wchip_mt7601u_t* mt, const uint8_t* f, uint16_t len){
     uint16_t status = f[28] | (f[29] << 8);
     if(status != 0){ char b[32]; snprintf(b, sizeof b, "auth status %u", status); mt_conn_fail(mt, b); return; }
     LOG("mt7601u: auth OK → assoc");
+    /* Don't TX from inside this RX-completion callback (libusb returns -6 EBUSY for a
+     * sync transfer issued from an async callback). Let the conn_timer send assoc. */
     mt->conn_state = MT_CONN_ASSOC; mt->conn_tries = 0;
-    mt_send_assoc(mt);
   } else if(mt->conn_state == MT_CONN_ASSOC && (f[0] == 0x10)){  // assoc response
     uint16_t status = f[26] | (f[27] << 8);
     if(status != 0){ char b[32]; snprintf(b, sizeof b, "assoc status %u", status); mt_conn_fail(mt, b); return; }
@@ -1196,11 +1197,18 @@ static void mt_data_rx(wchip_mt7601u_t* mt, const uint8_t* f, uint16_t len){
     if((da[0] & 1) ? !mt->gtk_set : !mt->tk_set) return;
     int pl = ccmp_decrypt(key, f, hdr, qos, f + hdr, len - hdr, body);
     if(pl < 0){
-      if(!(da[0] & 1)) LOG("mt7601u: CCMP decrypt FAILED (pairwise, to us!)");  // only flag unicast-to-us
-      return;
+      // diagnostic + self-heal: retry with the opposite QoS assumption
+      size_t hdr2 = qos ? 24u : 26u;
+      int pl2 = (len > hdr2 + 16) ? ccmp_decrypt(key, f, hdr2, !qos, f + hdr2, len - hdr2, body) : -1;
+      if(!(da[0] & 1))
+        LOG("mt7601u: CCMP FAIL pairwise fc:%02x%02x len:%u qos:%d hdr:%zu | hdr[0..3]:%02x%02x%02x%02x retry(!qos)->%d",
+            f[0], f[1], len, qos, hdr, f[0], f[1], f[2], f[3], pl2);
+      if(pl2 < 0) return;
+      pl = pl2; snap = body; snap_len = (size_t)pl2;
+    } else {
+      snap = body; snap_len = (size_t)pl;
     }
-    snap = body; snap_len = (size_t)pl;
-    if(!(da[0] & 1)) LOG("mt7601u RX data (pairwise, to us) %u B etype:0x%02x%02x", (unsigned)pl, snap[6], snap[7]);
+    if(!(da[0] & 1)) LOG("mt7601u RX data (pairwise, to us) %u B etype:0x%02x%02x", (unsigned)snap_len, snap[6], snap[7]);
   } else {
     snap = f + hdr; snap_len = len - hdr;
   }
@@ -1249,6 +1257,22 @@ static bool mt_disconnect(wifi_chip_t* chip, uint8_t reason){
   }
   mt->conn_state = MT_CONN_IDLE;
   mt->tk_set = mt->gtk_set = false;
+  return true;
+}
+
+/* Clear all radio state for a fresh OS session: deauth a stale association (free the AP's slot),
+ * drop keys/scan/counters, return to monitor RX on a known channel. Sent by the OS at startup. */
+static bool mt_op_reset(wifi_chip_t* chip){
+  wchip_mt7601u_t* mt = MT(chip);
+  if(!mt->usb_device.usr_data) return false;
+  if(mt->scanning){ mt->scanning = false; io_rem_timer(&mt->scan_timer); }
+  mt_disconnect(chip, 3);                 // deauth if associated + clear conn/keys
+  mt->n_results = 0;
+  mt->tx_seq = 0; mt->tx_pn = 0;
+  mt->assoc_ie_len = 0;
+  mt_set_channel(mt, 1);
+  mt_mac_start(mt);
+  LOG("mt7601u: radio reset (state cleared)");
   return true;
 }
 
@@ -1312,6 +1336,7 @@ static bool mt_op_tx_raw80211(wifi_chip_t* chip, uint8_t* frame, size_t len){
 const wifi_chip_ops_t wchip_mt7601u_ops = {
   .init        = mt_init,
   .deinit      = mt_deinit,
+  .reset       = mt_op_reset,
   .set_mode    = mt_set_mode,
   .set_channel = mt_op_set_channel,
   .scan        = mt_scan,
