@@ -90,6 +90,14 @@ typedef enum{
   WIFI_APPIE_ASSOC_REQ= 2,
 } wifi_appie_type_t;
 
+/* SAE message type (wifi_sae_t.sae_type) — matches the 802.11 auth transaction seq */
+typedef enum{
+  WIFI_SAE_COMMIT  = 1,
+  WIFI_SAE_CONFIRM = 2,
+} wifi_sae_type_t;
+
+#define WIFI_SAE_GROUP_P256 19   /* finite cyclic group 19 = NIST P-256 */
+
 /* key cipher (wifi_key_t.alg), mirrors esp wifi_wpa_alg_t */
 typedef enum{
   WIFI_WPA_ALG_NONE  = 0,
