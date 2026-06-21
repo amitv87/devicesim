@@ -1087,11 +1087,14 @@ static void mt_scan_tick(io_timer_t* t){
   mt_mac_start(mt);                                // re-enable RX on the new channel
 }
 
+#define MT_SCAN_DWELL_MS 300   /* default per-channel dwell when the OS doesn't specify one */
+
 /* Backend-owned active scan: hop channels, collect beacons, present FullMAC results. */
 static bool mt_scan(wifi_chip_t* chip, wifi_scan_req_t* req){
   wchip_mt7601u_t* mt = MT(chip);
   if(!mt->usb_device.usr_data) return false;
   if(mt->scanning) return true;
+  uint16_t dwell = (req && req->dwell_ms) ? req->dwell_ms : MT_SCAN_DWELL_MS;
   mt->n_results = 0;
   mt->scanning = true;
   uint8_t start = (req && req->channel) ? req->channel : 1;
@@ -1099,9 +1102,9 @@ static bool mt_scan(wifi_chip_t* chip, wifi_scan_req_t* req){
   mt_set_channel(mt, start);
   mt_mac_start(mt);
   mt->scan_timer = (io_timer_t){ .repeat = true, .run_now = false,
-                                 .interval_ms = 120, .usr_data = mt, .cb = mt_scan_tick };
+                                 .interval_ms = dwell, .usr_data = mt, .cb = mt_scan_tick };
   io_add_timer(&mt->scan_timer);
-  LOG("mt7601u scan: hopping ch%u..%u (120ms dwell)", start, mt->scan_max_chan);
+  LOG("mt7601u scan: hopping ch%u..%u (%ums dwell)", start, mt->scan_max_chan, dwell);
   return true;
 }
 /* ---- STA association MLME (open auth → assoc → CONNECTED) ---------------- */
@@ -1173,7 +1176,7 @@ static bool mt_sae_msg(wifi_chip_t* chip, wifi_sae_t* s, uint8_t* body, size_t l
   uint16_t seq = (s->sae_type == WIFI_SAE_COMMIT) ? 1 : 2;
   f[n++] = 3; f[n++] = 0;                 // auth algorithm = SAE
   f[n++] = (uint8_t)seq; f[n++] = (uint8_t)(seq >> 8);
-  f[n++] = 0; f[n++] = 0;                 // status
+  f[n++] = (uint8_t)s->status; f[n++] = (uint8_t)(s->status >> 8);   // 126 = H2E on commit
   if(n + len > sizeof f) return false;
   memcpy(f + n, body, len); n += len;
   if(n <= sizeof mt->sae_tx){ memcpy(mt->sae_tx, f, n); mt->sae_tx_len = (uint16_t)n; }
@@ -1188,7 +1191,11 @@ static void mt_conn_rx(wchip_mt7601u_t* mt, const uint8_t* f, uint16_t len){
   if((mt->conn_state == MT_CONN_SAE_COMMIT || mt->conn_state == MT_CONN_SAE_CONFIRM)
      && f[0] == 0xB0 && len >= 30 && (f[24] | (f[25] << 8)) == 3){
     uint16_t seq = f[26] | (f[27] << 8), status = f[28] | (f[29] << 8);
-    if(status != 0){ char b[32]; snprintf(b, sizeof b, "SAE status %u", status); mt_conn_fail(mt, b); return; }
+    LOG("mt7601u: SAE rx seq=%u status=%u len=%u body[0..3]=%02x%02x%02x%02x",
+        seq, status, len, len>30?f[30]:0, len>31?f[31]:0, len>32?f[32]:0, len>33?f[33]:0);
+    /* commit may carry status 126 (H2E); confirm must be status 0. */
+    bool ok = (seq == 1) ? (status == 0 || status == WIFI_SAE_STATUS_H2E) : (status == 0);
+    if(!ok){ char b[32]; snprintf(b, sizeof b, "SAE status %u", status); mt_conn_fail(mt, b); return; }
     wifi_sae_t ev; memset(&ev, 0, sizeof ev); memcpy(ev.bssid, mt->ap_bssid, 6);
     uint8_t* bd = (uint8_t*)f + 30; uint16_t bl = len - 30;
     if(seq == 1 && mt->conn_state == MT_CONN_SAE_COMMIT){
@@ -1230,10 +1237,12 @@ static void mt_data_rx(wchip_mt7601u_t* mt, const uint8_t* f, uint16_t len){
   if(len < hdr + 8) return;
   const uint8_t* da = f + 4;                            // FromDS: addr1=DA(us), addr3=SA
   const uint8_t* sa = f + 16;
+  bool group = (da[0] & 1);
+  if(!group && memcmp(da, STA_MAC, 6) != 0) return;     // unicast to another STA — not ours, ignore
   uint8_t body[1600]; const uint8_t* snap; size_t snap_len;
   if(f[1] & 0x40){                                      // Protected → CCMP decrypt
-    const uint8_t* key = (da[0] & 1) ? mt->gtk : mt->tk;   // group key for mcast/bcast, else pairwise
-    if((da[0] & 1) ? !mt->gtk_set : !mt->tk_set) return;
+    const uint8_t* key = group ? mt->gtk : mt->tk;        // group key for mcast/bcast, else pairwise
+    if(group ? !mt->gtk_set : !mt->tk_set) return;
     int pl = ccmp_decrypt(key, f, hdr, qos, f + hdr, len - hdr, body);
     if(pl < 0){
       // diagnostic + self-heal: retry with the opposite QoS assumption

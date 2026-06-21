@@ -97,6 +97,7 @@ typedef enum{
 } wifi_sae_type_t;
 
 #define WIFI_SAE_GROUP_P256 19   /* finite cyclic group 19 = NIST P-256 */
+#define WIFI_SAE_STATUS_H2E 126  /* WLAN_STATUS_SAE_HASH_TO_ELEMENT (commit status code for H2E) */
 
 /* key cipher (wifi_key_t.alg), mirrors esp wifi_wpa_alg_t */
 typedef enum{
@@ -118,8 +119,9 @@ enum{
 /* ---- CTRL payload structs (all little-endian, packed) ------------------- */
 
 typedef struct{
-  uint8_t channel;   // 0 = scan all channels
-  uint8_t passive;   // 0 active, 1 passive
+  uint8_t  channel;   // 0 = scan all channels
+  uint8_t  passive;   // 0 active, 1 passive
+  uint16_t dwell_ms;  // per-channel dwell (0 = backend default)
 } __PACKED__ wifi_scan_req_t;
 
 typedef struct{
