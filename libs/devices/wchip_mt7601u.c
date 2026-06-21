@@ -239,7 +239,8 @@ static bool mt_tx_frame(wchip_mt7601u_t* mt, const uint8_t* frame, size_t frame_
 static void mt_scan_collect(wchip_mt7601u_t* mt, const uint8_t* frame, uint16_t mpdu_len, int8_t rssi);
 static void mt_conn_rx(wchip_mt7601u_t* mt, const uint8_t* frame, uint16_t len);   // auth/assoc resp
 static void mt_data_rx(wchip_mt7601u_t* mt, const uint8_t* frame, uint16_t len);   // 802.11 data → 802.3
-enum { MT_CONN_IDLE = 0, MT_CONN_AUTH, MT_CONN_ASSOC, MT_CONN_CONNECTED };
+enum { MT_CONN_IDLE = 0, MT_CONN_AUTH, MT_CONN_SAE_COMMIT, MT_CONN_SAE_CONFIRM,
+       MT_CONN_ASSOC, MT_CONN_CONNECTED };
 #define MT7601U_RXWI_LEN 28
 
 /* Bulk IN completion: a frame off the air. Real driver strips the RXWI
@@ -1159,12 +1160,50 @@ static void mt_conn_tick(io_timer_t* t){
   if(++mt->conn_tries > 5){ mt_conn_fail(mt, "auth/assoc timeout"); return; }
   if(mt->conn_state == MT_CONN_AUTH)       mt_send_auth(mt);
   else if(mt->conn_state == MT_CONN_ASSOC) mt_send_assoc(mt);
+  else if(mt->conn_state == MT_CONN_SAE_COMMIT || mt->conn_state == MT_CONN_SAE_CONFIRM){
+    if(mt->sae_tx_len) mt_tx_frame(mt, mt->sae_tx, mt->sae_tx_len);   /* retransmit last SAE auth */
+  }
   else io_rem_timer(&mt->conn_timer);
+}
+
+/* OS-built SAE commit/confirm body → wrap in an 802.11 AUTH frame (algorithm 3) + send. */
+static bool mt_sae_msg(wifi_chip_t* chip, wifi_sae_t* s, uint8_t* body, size_t len){
+  wchip_mt7601u_t* mt = MT(chip);
+  uint8_t f[256]; size_t n = mt_hdr(mt, f, 0xB0);
+  uint16_t seq = (s->sae_type == WIFI_SAE_COMMIT) ? 1 : 2;
+  f[n++] = 3; f[n++] = 0;                 // auth algorithm = SAE
+  f[n++] = (uint8_t)seq; f[n++] = (uint8_t)(seq >> 8);
+  f[n++] = 0; f[n++] = 0;                 // status
+  if(n + len > sizeof f) return false;
+  memcpy(f + n, body, len); n += len;
+  if(n <= sizeof mt->sae_tx){ memcpy(mt->sae_tx, f, n); mt->sae_tx_len = (uint16_t)n; }
+  LOG("mt7601u: TX SAE %s (%zuB) -> %d", seq == 1 ? "commit" : "confirm", len, mt_tx_frame(mt, f, n));
+  return true;
 }
 
 /* Handle an inbound mgmt frame while authenticating/associating. */
 static void mt_conn_rx(wchip_mt7601u_t* mt, const uint8_t* f, uint16_t len){
   if(len < 28 || memcmp(f + 10, mt->ap_bssid, 6) != 0) return;   // must be from our AP
+  /* SAE auth (algorithm 3): deliver the body to the OS supplicant + drive the sequence. */
+  if((mt->conn_state == MT_CONN_SAE_COMMIT || mt->conn_state == MT_CONN_SAE_CONFIRM)
+     && f[0] == 0xB0 && len >= 30 && (f[24] | (f[25] << 8)) == 3){
+    uint16_t seq = f[26] | (f[27] << 8), status = f[28] | (f[29] << 8);
+    if(status != 0){ char b[32]; snprintf(b, sizeof b, "SAE status %u", status); mt_conn_fail(mt, b); return; }
+    wifi_sae_t ev; memset(&ev, 0, sizeof ev); memcpy(ev.bssid, mt->ap_bssid, 6);
+    uint8_t* bd = (uint8_t*)f + 30; uint16_t bl = len - 30;
+    if(seq == 1 && mt->conn_state == MT_CONN_SAE_COMMIT){
+      ev.sae_type = WIFI_SAE_COMMIT; wifi_dev_on_sae_rx(mt->base.dev, &ev, bd, bl);
+      mt->conn_state = MT_CONN_SAE_CONFIRM; mt->conn_tries = 0; mt->sae_tx_len = 0;
+      wifi_sae_t b2; memset(&b2, 0, sizeof b2); memcpy(b2.bssid, mt->ap_bssid, 6); b2.sae_type = WIFI_SAE_CONFIRM;
+      wifi_dev_on_sae_build(mt->base.dev, &b2);          // ask OS for the confirm
+      LOG("mt7601u: SAE commit rx → building confirm");
+    } else if(seq == 2 && mt->conn_state == MT_CONN_SAE_CONFIRM){
+      ev.sae_type = WIFI_SAE_CONFIRM; wifi_dev_on_sae_rx(mt->base.dev, &ev, bd, bl);
+      mt->conn_state = MT_CONN_ASSOC; mt->conn_tries = 0;  // assoc sent by conn_tick (not this RX cb)
+      LOG("mt7601u: SAE confirm rx → assoc");
+    }
+    return;
+  }
   if(mt->conn_state == MT_CONN_AUTH && f[0] == 0xB0){            // auth response
     uint16_t status = f[28] | (f[29] << 8);
     if(status != 0){ char b[32]; snprintf(b, sizeof b, "auth status %u", status); mt_conn_fail(mt, b); return; }
@@ -1237,12 +1276,21 @@ static bool mt_connect(wifi_chip_t* chip, wifi_connect_req_t* req){
   mt_wr(mt, MT_MAC_ADDR_DW1,  STA_MAC[4] | (STA_MAC[5]<<8));
   mt_wr(mt, MT_MAC_BSSID_DW0, req->bssid[0] | (req->bssid[1]<<8) | (req->bssid[2]<<16) | ((uint32_t)req->bssid[3]<<24));
   mt_wr(mt, MT_MAC_BSSID_DW1, req->bssid[4] | (req->bssid[5]<<8));
-  mt->conn_state = MT_CONN_AUTH; mt->conn_tries = 0;
-  mt_send_auth(mt);
+  mt->conn_tries = 0; mt->sae_tx_len = 0;
+  if(mt->is_sae){
+    /* WPA3: ask the OS for the SAE commit; mt_sae_msg sends it. Auth frames flow as algo=3. */
+    mt->conn_state = MT_CONN_SAE_COMMIT;
+    wifi_sae_t s; memset(&s, 0, sizeof s); memcpy(s.bssid, mt->ap_bssid, 6); s.sae_type = WIFI_SAE_COMMIT;
+    wifi_dev_on_sae_build(mt->base.dev, &s);
+  } else {
+    mt->conn_state = MT_CONN_AUTH;
+    mt_send_auth(mt);
+  }
   mt->conn_timer = (io_timer_t){ .repeat = true, .run_now = false, .interval_ms = 300,
                                  .usr_data = mt, .cb = mt_conn_tick };
   io_add_timer(&mt->conn_timer);
-  LOG("mt7601u: connecting '%s' ch%u %02x:%02x:%02x:%02x:%02x:%02x", mt->conn_ssid, ch,
+  LOG("mt7601u: connecting '%s' (%s) ch%u %02x:%02x:%02x:%02x:%02x:%02x", mt->conn_ssid,
+      mt->is_sae ? "WPA3/SAE" : "open/WPA2", ch,
       req->bssid[0],req->bssid[1],req->bssid[2],req->bssid[3],req->bssid[4],req->bssid[5]);
   return true;
 }
@@ -1279,7 +1327,18 @@ static bool mt_op_reset(wifi_chip_t* chip){
 static bool mt_set_appie(wifi_chip_t* chip, uint8_t type, uint8_t* ie, size_t len){
   wchip_mt7601u_t* mt = MT(chip);
   if(type == WIFI_APPIE_RSN && len <= sizeof mt->assoc_ie){ memcpy(mt->assoc_ie, ie, len); mt->assoc_ie_len = (uint8_t)len; }
-  LOG("mt7601u set_appie type:%u len:%zu", type, len);
+  /* detect AKM=SAE in the RSN IE → use SAE auth: ver(2) group(4) pair_cnt(2)+pair*4 akm_cnt(2)+akm */
+  mt->is_sae = false;
+  if(type == WIFI_APPIE_RSN && len >= 4 && ie[0] == 0x30){
+    const uint8_t* r = ie + 2; size_t rl = ie[1], q = 2 + 4;
+    if(q + 2 <= rl){ uint16_t pc = r[q] | (r[q+1] << 8); q += 2 + (size_t)pc * 4;
+      if(q + 2 <= rl){ uint16_t ac = r[q] | (r[q+1] << 8); q += 2;
+        for(uint16_t k = 0; k < ac && q + 4 <= rl; k++, q += 4)
+          if(r[q]==0x00 && r[q+1]==0x0f && r[q+2]==0xac && r[q+3]==0x08){ mt->is_sae = true; break; }
+      }
+    }
+  }
+  LOG("mt7601u set_appie type:%u len:%zu sae:%d", type, len, mt->is_sae);
   return true;
 }
 static bool mt_set_key(wifi_chip_t* chip, wifi_key_t* k, uint8_t* key){
@@ -1343,10 +1402,10 @@ const wifi_chip_ops_t wchip_mt7601u_ops = {
   .connect     = mt_connect,
   .disconnect  = mt_disconnect,
   .set_appie   = mt_set_appie,
+  .sae_msg     = mt_sae_msg,
   .set_key     = mt_set_key,
   .set_igtk    = mt_set_igtk,
   .send_mgmt   = mt_send_mgmt,
-  .sae_msg     = NULL,
   .config_done = mt_config_done,
   .tx_data     = mt_tx_data,
   .tx_raw80211 = mt_op_tx_raw80211,

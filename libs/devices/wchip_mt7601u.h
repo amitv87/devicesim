@@ -55,6 +55,10 @@ typedef struct{
   uint8_t    gtk_idx;
   bool       gtk_set;
   uint64_t   tx_pn;           // CCMP packet number (TX)
+  // WPA3 SAE auth (algo 3): the OS builds commit/confirm bodies; we wrap them in AUTH frames.
+  bool       is_sae;
+  uint8_t    sae_tx[256];     // last SAE auth frame (for retransmit)
+  uint16_t   sae_tx_len;
   // active scan: backend channel-hop + beacon collect → SCAN_RESULT (FullMAC-presented).
   bool       scanning;
   uint8_t    scan_max_chan;   // last channel to dwell (req->channel or 13)
