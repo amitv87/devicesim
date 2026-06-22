@@ -131,14 +131,16 @@ static bool ccm_decrypt(const uint8_t key[16], const uint8_t nonce[13], const ui
 }
 
 /* ---- CCMP framing (nonce + AAD from the 802.11 header) ------------------ */
-static void ccmp_na(const uint8_t* hdr, bool qos, const uint8_t pn6[6],
+static void ccmp_na(const uint8_t* hdr, bool qos, bool mgmt, const uint8_t pn6[6],
                     uint8_t nonce[13], uint8_t* aad, size_t* aad_len){
   uint16_t fc = (uint16_t)(hdr[0] | (hdr[1] << 8));
   uint8_t tid = qos ? (uint8_t)(hdr[24] & 0x0f) : 0;
-  nonce[0] = tid;                                 /* priority (mgmt bit unused for data) */
+  nonce[0] = (uint8_t)(tid | (mgmt ? 0x10 : 0));  /* priority + Management bit (802.11w) */
   memcpy(nonce + 1, hdr + 10, 6);                 /* A2 */
   nonce[7]=pn6[5]; nonce[8]=pn6[4]; nonce[9]=pn6[3]; nonce[10]=pn6[2]; nonce[11]=pn6[1]; nonce[12]=pn6[0];
-  uint16_t mfc = (uint16_t)((fc & ~(0x0070 | 0x3800)) | 0x4000);   /* mask subtype/retry/pm/md, set protected */
+  /* mask Retry/PwrMgt/MoreData + set Protected; mask the subtype only for DATA frames */
+  uint16_t clr = (uint16_t)(0x3800 | (mgmt ? 0 : 0x0070));
+  uint16_t mfc = (uint16_t)((fc & ~clr) | 0x4000);
   size_t p = 0;
   aad[p++] = (uint8_t)mfc; aad[p++] = (uint8_t)(mfc >> 8);
   memcpy(aad + p, hdr + 4, 18); p += 18;          /* A1 A2 A3 */
@@ -148,11 +150,11 @@ static void ccmp_na(const uint8_t* hdr, bool qos, const uint8_t pn6[6],
   *aad_len = p;
 }
 
-size_t ccmp_encrypt(const uint8_t tk[16], const uint8_t* hdr, size_t hdr_len, bool qos,
+size_t ccmp_encrypt(const uint8_t tk[16], const uint8_t* hdr, size_t hdr_len, bool qos, bool mgmt,
                     uint64_t pn, uint8_t keyid, const uint8_t* body, size_t body_len, uint8_t* out){
   uint8_t pn6[6]; for(int i = 0; i < 6; i++) pn6[i] = (uint8_t)(pn >> (8 * i));
   uint8_t nonce[13], aad[32]; size_t aad_len;
-  ccmp_na(hdr, qos, pn6, nonce, aad, &aad_len);
+  ccmp_na(hdr, qos, mgmt, pn6, nonce, aad, &aad_len);
   memcpy(out, hdr, hdr_len);
   out[1] |= 0x40;                                 /* Protected */
   uint8_t* cc = out + hdr_len;
@@ -162,18 +164,43 @@ size_t ccmp_encrypt(const uint8_t tk[16], const uint8_t* hdr, size_t hdr_len, bo
   return hdr_len + 8 + body_len + 8;
 }
 
-int ccmp_decrypt(const uint8_t key[16], const uint8_t* hdr, size_t hdr_len, bool qos,
+int ccmp_decrypt(const uint8_t key[16], const uint8_t* hdr, size_t hdr_len, bool qos, bool mgmt,
                  const uint8_t* in, size_t in_len, uint8_t* out){
   if(in_len < 8 + 8) return -1;
   const uint8_t* cc = in;
   uint8_t pn6[6] = { cc[0], cc[1], cc[4], cc[5], cc[6], cc[7] };
   uint8_t nonce[13], aad[32]; size_t aad_len;
-  ccmp_na(hdr, qos, pn6, nonce, aad, &aad_len);
+  ccmp_na(hdr, qos, mgmt, pn6, nonce, aad, &aad_len);
   size_t ct_len = in_len - 8 - 8;
   const uint8_t* ct = in + 8;
   const uint8_t* mic = in + 8 + ct_len;
   if(!ccm_decrypt(key, nonce, aad, aad_len, ct, ct_len, out, mic)) return -1;
   return (int)ct_len;
+}
+
+/* ---- AES-CMAC (RFC 4493) for 802.11w BIP-CMAC-128 ----------------------- */
+static void cmac_lshift(const uint8_t in[16], uint8_t out[16]){
+  uint8_t ov = 0;
+  for(int i = 15; i >= 0; i--){ out[i] = (uint8_t)((in[i] << 1) | ov); ov = in[i] >> 7; }
+}
+
+void aes_cmac128(const uint8_t key[16], const uint8_t* msg, size_t len, uint8_t mac[16]){
+  uint8_t rk[176]; aes128_expand(key, rk);
+  uint8_t L[16] = {0}; aes128_encrypt(rk, L, L);            /* L = E(0) */
+  uint8_t K1[16], K2[16];
+  cmac_lshift(L, K1);  if(L[0]  & 0x80) K1[15] ^= 0x87;     /* subkeys */
+  cmac_lshift(K1, K2); if(K1[0] & 0x80) K2[15] ^= 0x87;
+  size_t n = (len + 15) / 16;
+  bool complete = (n != 0) && (len % 16 == 0);
+  if(n == 0) n = 1;
+  uint8_t X[16] = {0};
+  for(size_t i = 0; i + 1 < n; i++){ xor16(X, msg + 16 * i); aes128_encrypt(rk, X, X); }
+  uint8_t last[16];
+  size_t rem = len - 16 * (n - 1);
+  if(complete){ memcpy(last, msg + 16 * (n - 1), 16); xor16(last, K1); }
+  else { memset(last, 0, 16); memcpy(last, msg + 16 * (n - 1), rem); last[rem] = 0x80; xor16(last, K2); }
+  xor16(X, last); aes128_encrypt(rk, X, X);
+  memcpy(mac, X, 16);
 }
 
 /* ---- KAT: RFC 3610 Packet Vector #1 ------------------------------------- */
@@ -195,5 +222,20 @@ int ccmp_selftest(void){
   if(!ccm_decrypt(key, nonce, aad, 8, ct, 23, dec, mic) || memcmp(dec, msg, 23)) return 2;
   mic[0] ^= 1;                                     /* tamper → must fail */
   if(ccm_decrypt(key, nonce, aad, 8, ct, 23, dec, mic)) return 3;
+
+  /* AES-CMAC RFC 4493 example 1 (empty message). */
+  static const uint8_t ck[16] = {
+    0x2b,0x7e,0x15,0x16,0x28,0xae,0xd2,0xa6,0xab,0xf7,0x15,0x88,0x09,0xcf,0x4f,0x3c };
+  static const uint8_t want_mac[16] = {
+    0xbb,0x1d,0x69,0x29,0xe9,0x59,0x37,0x28,0x7f,0xa3,0x7d,0x12,0x9b,0x75,0x67,0x46 };
+  uint8_t cm[16]; aes_cmac128(ck, NULL, 0, cm);
+  if(memcmp(cm, want_mac, 16)) return 4;
+
+  /* Robust-management CCMP round-trip (mgmt nonce/AAD path). */
+  uint8_t hdr[24] = { 0xc0,0x00, 0,0, 1,2,3,4,5,6, 7,8,9,10,11,12, 1,2,3,4,5,6, 0x10,0x00 };
+  uint8_t mbody[2] = { 0x03, 0x00 }, menc[64], mdec[8];
+  size_t mn = ccmp_encrypt(key, hdr, 24, false, true, 5, 0, mbody, 2, menc);
+  if(ccmp_decrypt(key, hdr, 24, false, true, menc + 24, mn - 24, mdec) != 2
+     || memcmp(mdec, mbody, 2)) return 5;
   return 0;
 }

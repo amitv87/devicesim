@@ -239,6 +239,7 @@ static bool mt_tx_frame(wchip_mt7601u_t* mt, const uint8_t* frame, size_t frame_
 static void mt_scan_collect(wchip_mt7601u_t* mt, const uint8_t* frame, uint16_t mpdu_len, int8_t rssi);
 static void mt_conn_rx(wchip_mt7601u_t* mt, const uint8_t* frame, uint16_t len);   // auth/assoc resp
 static void mt_data_rx(wchip_mt7601u_t* mt, const uint8_t* frame, uint16_t len);   // 802.11 data → 802.3
+static bool mt_bip_verify(wchip_mt7601u_t* mt, const uint8_t* frame, uint16_t len); // group robust mgmt (IGTK)
 enum { MT_CONN_IDLE = 0, MT_CONN_AUTH, MT_CONN_SAE_COMMIT, MT_CONN_SAE_CONFIRM,
        MT_CONN_ASSOC, MT_CONN_CONNECTED };
 #define MT7601U_RXWI_LEN 28
@@ -273,14 +274,38 @@ static void on_rx(usb_transfer_t* transfer, uint8_t* data, size_t length){
         uint8_t type = frame[0] & 0x0c;          // 0x00 mgmt, 0x08 data
         if(type == 0x08) mt_data_rx(mt, frame, mpdu_len);                 // data (incl EAPOL)
         else if(frame[0] == 0xc0 || frame[0] == 0xa0){                    // deauth / disassoc
-          LOG("mt7601u: deauth/disassoc from AP"); mt->conn_state = MT_CONN_IDLE;
-          wifi_dev_on_disconnected(mt->base.dev, 0);
+          /* 802.11w (PMF, WPA3/SAE only): a robust mgmt frame is honored only if cryptographically
+           * protected — unicast via CCMP (PTK), group via BIP (IGTK) — so a spoofed deauth can't
+           * knock us off. On a non-PMF (WPA2) link the deauth is unprotected and honored as-is. */
+          const char* kind = frame[0] == 0xc0 ? "deauth" : "disassoc";
+          bool honored = false; uint16_t reason = 0;
+          if(!mt->is_sae){
+            reason = mpdu_len >= 26 ? (frame[24] | (frame[25] << 8)) : 0; honored = true;
+          } else if(!(frame[4] & 1)){          // unicast → CCMP (PTK)
+            if((frame[1] & 0x40) && mt->tk_set){
+              uint8_t pt[64];
+              int pl = ccmp_decrypt(mt->tk, frame, 24, false, true, frame + 24, mpdu_len - 24, pt);
+              if(pl >= 2){ reason = pt[0] | (pt[1] << 8); honored = true; }
+              else LOG("mt7601u: unicast %s CCMP verify failed — ignored", kind);
+            } else LOG("mt7601u: unprotected unicast %s — ignored (PMF)", kind);
+          } else {                             // group → BIP (IGTK)
+            if(mt_bip_verify(mt, frame, mpdu_len)){
+              reason = mpdu_len >= 26 ? (frame[24] | (frame[25] << 8)) : 0; honored = true;
+            } else LOG("mt7601u: group %s BIP verify failed/absent — ignored (PMF)", kind);
+          }
+          if(honored){
+            LOG("mt7601u: %s from AP reason=%u (protected) — disconnecting", kind, reason);
+            mt->conn_state = MT_CONN_IDLE;
+            mt->tk_set = mt->gtk_set = mt->igtk_set = false;
+            wifi_dev_on_disconnected(mt->base.dev, 0);
+          }
         }
       } else if(mt->conn_state != MT_CONN_IDLE){
         mt_conn_rx(mt, frame, mpdu_len);          // auth / assoc response
-      } else {
-        wifi_dev_on_rx_80211(mt->base.dev, frame, mpdu_len, mt->channel, (int8_t)rssi, rate);
       }
+      /* IDLE + not scanning: drop. The OS is FullMAC (scan/auth/assoc/data via CTRL+DATA planes)
+       * and never consumes RAW80211, so forwarding every beacon on the air just floods the pty
+       * and can starve the SCAN_DONE / event delivery. */
     }
     p += seg, rem -= seg;
   }
@@ -1160,7 +1185,8 @@ static void mt_conn_fail(wchip_mt7601u_t* mt, const char* why){
 
 static void mt_conn_tick(io_timer_t* t){
   wchip_mt7601u_t* mt = t->usr_data;
-  if(++mt->conn_tries > 5){ mt_conn_fail(mt, "auth/assoc timeout"); return; }
+  /* an SA-Query comeback (status 30) needs the AP a few seconds to evict its stale SA */
+  if(++mt->conn_tries > (mt->assoc_comeback ? 15 : 5)){ mt_conn_fail(mt, "auth/assoc timeout"); return; }
   if(mt->conn_state == MT_CONN_AUTH)       mt_send_auth(mt);
   else if(mt->conn_state == MT_CONN_ASSOC) mt_send_assoc(mt);
   else if(mt->conn_state == MT_CONN_SAE_COMMIT || mt->conn_state == MT_CONN_SAE_CONFIRM){
@@ -1220,10 +1246,18 @@ static void mt_conn_rx(wchip_mt7601u_t* mt, const uint8_t* f, uint16_t len){
     mt->conn_state = MT_CONN_ASSOC; mt->conn_tries = 0;
   } else if(mt->conn_state == MT_CONN_ASSOC && (f[0] == 0x10)){  // assoc response
     uint16_t status = f[26] | (f[27] << 8);
+    if(status == 30){
+      /* 802.11w: AP still holds our prior PMF SA and is running SA Query against it. It evicts
+       * the stale SA once that times out; stay in ASSOC and let conn_tick retry (widened budget). */
+      mt->assoc_comeback = true; mt->conn_tries = 0;
+      LOG("mt7601u: assoc rejected (status 30 — SA Query) → retrying assoc until AP evicts stale SA");
+      return;
+    }
     if(status != 0){ char b[32]; snprintf(b, sizeof b, "assoc status %u", status); mt_conn_fail(mt, b); return; }
     uint16_t aid = (uint16_t)((f[28] | (f[29] << 8)) & 0x3fff);
     LOG("mt7601u: ASSOCIATED (aid=%u) — link up, awaiting 4-way", aid);
     io_rem_timer(&mt->conn_timer);
+    mt->assoc_comeback = false;
     mt->conn_state = MT_CONN_CONNECTED;
     wifi_dev_on_connect(mt->base.dev, mt->ap_bssid);
     wifi_dev_on_connected(mt->base.dev, mt->ap_bssid);
@@ -1235,27 +1269,40 @@ static void mt_data_rx(wchip_mt7601u_t* mt, const uint8_t* f, uint16_t len){
   bool qos = (f[0] & 0xf0) == 0x80;
   size_t hdr = 24u + (qos ? 2u : 0u);
   if(len < hdr + 8) return;
-  const uint8_t* da = f + 4;                            // FromDS: addr1=DA(us), addr3=SA
+  const uint8_t* da = f + 4;                            // FromDS: addr1=DA(us), addr2=BSSID, addr3=SA
   const uint8_t* sa = f + 16;
   bool group = (da[0] & 1);
+  if(memcmp(f + 10, mt->ap_bssid, 6) != 0) return;     // not our BSS — monitor sees the whole channel
   if(!group && memcmp(da, STA_MAC, 6) != 0) return;     // unicast to another STA — not ours, ignore
   uint8_t body[1600]; const uint8_t* snap; size_t snap_len;
   if(f[1] & 0x40){                                      // Protected → CCMP decrypt
     const uint8_t* key = group ? mt->gtk : mt->tk;        // group key for mcast/bcast, else pairwise
     if(group ? !mt->gtk_set : !mt->tk_set) return;
-    int pl = ccmp_decrypt(key, f, hdr, qos, f + hdr, len - hdr, body);
+    /* mt76 RX leaves the 4-byte 802.11 FCS in the reported length; the CCMP MIC is the 8 bytes
+     * *before* it, so decrypt over [hdr .. len-FCS). Try FCS-stripped first, fall back to the
+     * full length in case a given RX path already trimmed it. */
+    uint16_t mlen = (len >= hdr + 8 + 4 + 4) ? (uint16_t)(len - 4) : len;
+    int pl = ccmp_decrypt(key, f, hdr, qos, false, f + hdr, mlen - hdr, body);
+    if(pl < 0 && mlen != len)
+      pl = ccmp_decrypt(key, f, hdr, qos, false, f + hdr, len - hdr, body);
     if(pl < 0){
-      // diagnostic + self-heal: retry with the opposite QoS assumption
-      size_t hdr2 = qos ? 24u : 26u;
-      int pl2 = (len > hdr2 + 16) ? ccmp_decrypt(key, f, hdr2, !qos, f + hdr2, len - hdr2, body) : -1;
-      if(!(da[0] & 1))
-        LOG("mt7601u: CCMP FAIL pairwise fc:%02x%02x len:%u qos:%d hdr:%zu | hdr[0..3]:%02x%02x%02x%02x retry(!qos)->%d",
-            f[0], f[1], len, qos, hdr, f[0], f[1], f[2], f[3], pl2);
-      if(pl2 < 0) return;
-      pl = pl2; snap = body; snap_len = (size_t)pl2;
-    } else {
-      snap = body; snap_len = (size_t)pl;
+      /* Trace undecryptable protected frames. A real AP's CCMP should decrypt with the installed
+       * PTK/GTK; failures here have been seen only against phone hotspots, whose frames don't match
+       * a standard CCMP/GCMP layout under the (handshake-verified) TK. Brute-force which construction
+       * (if any) recovers it, to localize a future fix. */
+      uint8_t tb[1600]; const uint8_t* ks[2] = { mt->tk, mt->gtk }; const char* kn[2] = { "tk", "gtk" };
+      for(int ki = 0; ki < 2; ki++) for(int m = 0; m < 2; m++) for(int fcs = 0; fcs < 2; fcs++){
+        uint16_t L = fcs ? (uint16_t)(len >= hdr + 20 ? len - 4 : len) : len;
+        if(ccmp_decrypt(ks[ki], f, hdr, qos, m, f + hdr, L - hdr, tb) >= 0)
+          LOG("mt7601u: CCMP recovered key=%s mgmt=%d fcs=%d", kn[ki], m, fcs);
+      }
+      const uint8_t* cc = f + hdr;
+      LOG("mt7601u: CCMP FAIL %s len:%u keyid:%u pn:%02x%02x%02x%02x%02x%02x",
+          group ? "group" : "pairwise", len, (cc[3] >> 6),
+          cc[7], cc[6], cc[5], cc[4], cc[1], cc[0]);
+      return;
     }
+    snap = body; snap_len = (size_t)pl;
     if(!(da[0] & 1)) LOG("mt7601u RX data (pairwise, to us) %u B etype:0x%02x%02x", (unsigned)snap_len, snap[6], snap[7]);
   } else {
     snap = f + hdr; snap_len = len - hdr;
@@ -1309,11 +1356,25 @@ static bool mt_disconnect(wifi_chip_t* chip, uint8_t reason){
   if(mt->conn_state != MT_CONN_IDLE){
     io_rem_timer(&mt->conn_timer);
     uint8_t f[26]; size_t n = mt_hdr(mt, f, 0xC0);   // deauth — free our slot at the AP
-    f[n++] = reason ? reason : 3; f[n++] = 0;
-    mt_tx_frame(mt, f, n);
+    f[n++] = reason ? reason : 3; f[n++] = 0;        // reason code (2B body)
+    if(mt->tk_set && mt->is_sae){
+      /* 802.11w (PMF, mandatory for WPA3/SAE): once a PTK is installed, a deauth is a robust
+       * mgmt frame and MUST be CCMP-protected. An unprotected deauth is ignored by the AP,
+       * which keeps our SA — the next assoc gets status 30 (SA Query) and only an AP reset
+       * recovers. Non-PMF (WPA2) links send the deauth in the clear, as the AP expects. */
+      uint8_t enc[64];
+      size_t outn = ccmp_encrypt(mt->tk, f, 24, false, true, mt->tx_pn, 0, f + 24, 2, enc);
+      bool ok = mt_tx_frame(mt, enc, outn);
+      LOG("mt7601u: TX deauth (CCMP-protected, reason=%u pn=%llu) -> %d",
+          f[24], (unsigned long long)mt->tx_pn, ok);
+      mt->tx_pn++;
+    } else {
+      mt_tx_frame(mt, f, n);
+      LOG("mt7601u: TX deauth (clear, reason=%u)", f[24]);
+    }
   }
   mt->conn_state = MT_CONN_IDLE;
-  mt->tk_set = mt->gtk_set = false;
+  mt->tk_set = mt->gtk_set = mt->igtk_set = false;
   return true;
 }
 
@@ -1358,7 +1419,44 @@ static bool mt_set_key(wifi_chip_t* chip, wifi_key_t* k, uint8_t* key){
   LOG("mt7601u set_key %s idx:%u (sw CCMP)", (k->key_flag & WIFI_KEY_FLAG_PAIRWISE) ? "pairwise" : "group", k->key_idx);
   return true;
 }
-static bool mt_set_igtk(wifi_chip_t* chip, wifi_igtk_t* igtk){ return false; }
+/* 802.11w BIP-CMAC-128: verify the MME on a group-addressed robust mgmt frame with the IGTK.
+ * MME = EID 0x4c, len 16: KeyID(2) IPN(6) MIC(8). AAD = masked FC || A1 || A2 || A3; the AES-CMAC
+ * runs over AAD || mgmt-body (with the MME MIC field zeroed); the low 8 octets are the MIC. */
+static bool mt_bip_verify(wchip_mt7601u_t* mt, const uint8_t* f, uint16_t len){
+  if(!mt->igtk_set || len < 24 + 2 + 18) return false;
+  int mme = -1;
+  for(size_t p = 24; p + 2 <= len; ){
+    uint8_t id = f[p], l = f[p + 1];
+    if(p + 2u + l > len) break;
+    if(id == 0x4c && l == 16){ mme = (int)p; break; }
+    p += 2u + l;
+  }
+  if(mme < 0) return false;
+  uint8_t buf[512];
+  size_t body_len = (size_t)len - 24;
+  if(20 + body_len > sizeof buf) return false;
+  uint16_t fc = (uint16_t)((f[0] | (f[1] << 8)) & ~0x3800);  /* mask Retry/PwrMgt/MoreData */
+  size_t bn = 0;
+  buf[bn++] = (uint8_t)fc; buf[bn++] = (uint8_t)(fc >> 8);
+  memcpy(buf + bn, f + 4, 18); bn += 18;                     /* A1 A2 A3 */
+  memcpy(buf + bn, f + 24, body_len);
+  size_t mic_off = bn + ((size_t)mme - 24) + 2 + 2 + 6;      /* EID+len+KeyID+IPN → MIC */
+  uint8_t rx_mic[8]; memcpy(rx_mic, buf + mic_off, 8);
+  memset(buf + mic_off, 0, 8);
+  bn += body_len;
+  uint8_t mac[16]; aes_cmac128(mt->igtk, buf, bn, mac);
+  return memcmp(mac, rx_mic, 8) == 0;
+}
+
+static bool mt_set_igtk(wifi_chip_t* chip, wifi_igtk_t* igtk){
+  wchip_mt7601u_t* mt = MT(chip);
+  memcpy(mt->igtk, igtk->igtk, 16);                     // BIP-CMAC-128 uses the first 16 bytes
+  mt->igtk_id = (uint8_t)(igtk->keyid[0] | (igtk->keyid[1] << 8));
+  memcpy(mt->igtk_ipn, igtk->pn, 6);
+  mt->igtk_set = true;
+  LOG("mt7601u set_igtk id:%u (BIP-CMAC-128)", mt->igtk_id);
+  return true;
+}
 static bool mt_send_mgmt(wifi_chip_t* chip, wifi_mgmt_tx_t* m, uint8_t* frame, size_t len){ LOG("TODO mt7601u send_mgmt"); return false; }
 static bool mt_config_done(wifi_chip_t* chip){ return true; }
 
@@ -1384,7 +1482,7 @@ static bool mt_tx_data(wifi_chip_t* chip, uint8_t* eth, size_t len){
   if(mt->tk_set && etype != 0x888E){
     uint8_t enc[2048];
     size_t body = n - 24;                    // LLC/SNAP + payload (the MPDU body)
-    size_t outn = ccmp_encrypt(mt->tk, f, 24, false, mt->tx_pn, 0, f + 24, body, enc);
+    size_t outn = ccmp_encrypt(mt->tk, f, 24, false, false, mt->tx_pn, 0, f + 24, body, enc);
     bool ok = mt_tx_frame(mt, enc, outn);
     LOG("mt7601u TX data etype:0x%04x dst:%02x:%02x:%02x:%02x:%02x:%02x enc pn:%llu -> %d",
         etype, eth[0],eth[1],eth[2],eth[3],eth[4],eth[5], (unsigned long long)mt->tx_pn, ok);

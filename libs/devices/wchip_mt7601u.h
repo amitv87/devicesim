@@ -55,6 +55,12 @@ typedef struct{
   uint8_t    gtk_idx;
   bool       gtk_set;
   uint64_t   tx_pn;           // CCMP packet number (TX)
+  // 802.11w PMF: BIP-CMAC-128 IGTK (group mgmt) + SA-Query comeback retry.
+  uint8_t    igtk[16];        // integrity GTK (verifies group-addressed robust mgmt)
+  uint8_t    igtk_id;         // IGTK key id (4/5)
+  uint8_t    igtk_ipn[6];     // IGTK packet number (RX replay)
+  bool       igtk_set;
+  bool       assoc_comeback;  // a status-30 (SA-Query) reject is pending an assoc retry
   // WPA3 SAE auth (algo 3): the OS builds commit/confirm bodies; we wrap them in AUTH frames.
   bool       is_sae;
   uint8_t    sae_tx[256];     // last SAE auth frame (for retransmit)
