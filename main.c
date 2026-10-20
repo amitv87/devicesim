@@ -288,11 +288,15 @@ static transport_t* transports[] = {
   &wifi_transport,
 };
 
+enum { HCI_GENERIC = 0, HCI_RTL8821C = 1 };   // hci_devices[].int_val: vendor setup kind
+static bool bt_rtl_patch = false; // -r: upload the Realtek BT firmware patch (default: run the ROM as-is)
+
 static usb_dev_info_t hci_devices[] = {
   {.vid = 0x2357, .pid = 0x0604}, // UB500
   {.vid = 0x8087, .pid = 0x0029}, // AX200
   {.vid = 0x0a5c, .pid = 0x22be}, // BCM2070
   {.vid = 0x0a12, .pid = 0x0001}, // CSR8510
+  {.vid = 0x0bda, .pid = 0xc820, .int_val = HCI_RTL8821C}, // RTL8821CU (BT function, iface 0)
 };
 
 static usb_dev_info_t gsm_devices[] = {
@@ -335,6 +339,7 @@ static void usb_on_device(usb_host_t* host, usb_dev_info_t *dev_info, bool added
   if(is_device_present(dev_info, hci_devices, countof(hci_devices))){
     bool rc = false;
     if(added){
+      hci_dev.rtl_patch = bt_rtl_patch && dev_info->int_val == HCI_RTL8821C;
       rc = hci_usb_device_init(&hci_dev, dev_info);
       if(rc){
         uint8_t csr_warm_start[] = {
@@ -376,12 +381,13 @@ static void usb_on_device(usb_host_t* host, usb_dev_info_t *dev_info, bool added
 
 static void parse_args(int argc, char *argv[]){
   bool is_path = false, is_baud = false;
-  for(char c; (c = getopt(argc, argv, "pa:ba:pn:bn:ph:bhw:s")) != -1;){
+  for(char c; (c = getopt(argc, argv, "pa:ba:pn:bn:ph:bhw:sr")) != -1;){
     transport_t* transport = NULL;
     switch (c){
       case 'p': is_path = true; continue;
       case 'b': is_baud = true; continue;
       case 's': wifi_sim_only = true; continue;
+      case 'r': bt_rtl_patch = true; continue;
       case 'a': transport = &ate_transport; break;
       case 'h': transport = &hci_transport; break;
       case 'n': transport = &nmea_transport; break;

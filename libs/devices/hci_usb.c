@@ -1,4 +1,5 @@
 #include "hci_usb.h"
+#include "bt_rtl.h"
 
 #define DEFAULT_HCI_IF_NO (0x00)
 
@@ -111,6 +112,8 @@ bool hci_usb_device_init(hci_usb_device_t* hci_dev, usb_dev_info_t* info){
   FUN_CHK(usb_device_init, &hci_dev->usb_device, info);
   FUN_CHK(usb_device_open, &hci_dev->usb_device);
   FUN_CHK(usb_device_claim_iface, &hci_dev->usb_device, DEFAULT_HCI_IF_NO);
+  // vendor setup runs on the bare interface, before the async event/ACL transfers are armed
+  if(hci_dev->rtl_patch) bt_rtl_load_patch(&hci_dev->usb_device, DEFAULT_HCI_IF_NO, 0x81);
 
   hci_dev->input_buff = (io_buff_t){
     .bytes = hci_dev->__input_buff,

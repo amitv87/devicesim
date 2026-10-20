@@ -17,6 +17,7 @@ typedef struct hci_usb_device_s{
     usb_transfer_t xfers[4];
   };
   hci_output output;
+  bool rtl_patch;            // Realtek RTL8821C: upload the BT firmware patch at init (bt_rtl.c)
   io_buff_t input_buff;
   size_t rem_acl_bytes, rem_evt_bytes;
   uint8_t buff[2][1691 + 4 + 4];
