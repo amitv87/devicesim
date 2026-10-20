@@ -79,6 +79,12 @@ target_include_directories(usb PUBLIC ${LIBUSB_INCLUDES})
 
 target_link_libraries(devices PUBLIC usb)
 
+# Firmware blobs are pulled into the devices library with .incbin (libs/util/incbin.h).
+SET(devices_fw_dir "${libs_dir}/devices/fw")
+# INCBIN_SILENCE_BITCODE_WARNING: the macOS SDK defines TARGET_OS_IPHONE (as 0), which trips incbin's iOS check.
+target_compile_definitions(devices PRIVATE "DEVICES_FW_DIR=\"${devices_fw_dir}\"" INCBIN_SILENCE_BITCODE_WARNING)
+set_source_files_properties("${libs_dir}/devices/wchip_mt7601u.c" PROPERTIES OBJECT_DEPENDS "${devices_fw_dir}/mt7601u.bin")
+
 add_executable(app "main.c")
 target_include_directories(app PUBLIC libs)
 target_link_libraries(app PUBLIC at cmux util nmea devices net)

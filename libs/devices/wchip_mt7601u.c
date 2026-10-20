@@ -1,6 +1,12 @@
 #include <unistd.h>
 #include "wchip_mt7601u.h"
-#include "mt7601u_fw_bin.h"
+#define INCBIN_PREFIX  fw_
+#define INCBIN_STYLE   INCBIN_STYLE_SNAKE
+#include "../util/incbin.h"
+
+/* linux-firmware mediatek/mt7601u.bin
+ * sha256 4511b1d840e22aea2bf5fdca419c91c0d94cbfb291b9ac4f8be6d9100d1a7046 */
+INCBIN(mt7601u, DEVICES_FW_DIR "/mt7601u.bin");
 #include "ccmp.h"
 
 #define MT(chip) ((wchip_mt7601u_t*)(chip))
@@ -107,9 +113,9 @@ static bool mt_dma_fw(wchip_mt7601u_t* mt, const uint8_t* data, uint32_t len, ui
 /* Full firmware download: register preamble -> ILM/DLM DMA -> send IVB ->
  * wait for the MCU to report running (matches mt7601u_load_firmware). */
 static bool mt7601u_load_firmware(wchip_mt7601u_t* mt){
-  const uint8_t* fw = mt7601u_fw;
+  const uint8_t* fw = fw_mt7601u_data;
   uint32_t ilm_len = le32(fw + 0), dlm_len = le32(fw + 4);
-  if(mt7601u_fw_len != 0x20 + ilm_len + dlm_len || ilm_len <= MT_MCU_IVB_SIZE){
+  if(fw_mt7601u_size != 0x20 + ilm_len + dlm_len || ilm_len <= MT_MCU_IVB_SIZE){
     LOG("mt7601u: bad firmware image"); return false;
   }
   LOG("mt7601u fw ver %u.%u.%02u build %x time %.16s",
