@@ -10,6 +10,7 @@
 #include <devices/wifi.h>
 #include <devices/wchip_sim.h>
 #include <devices/wchip_mt7601u.h>
+#include <devices/wchip_rtl8821cu.h>
 
 #include "at_cmd.h"
 
@@ -212,6 +213,7 @@ static serial_usb_device_t gsm_dev = {}, gnss_dev = {};
 static wifi_dev_t wifi_dev = {};
 static wchip_sim_t wifi_sim = {};
 static wchip_mt7601u_t wifi_mt = {};
+static wchip_rtl8821cu_t wifi_rtl = {};
 static bool wifi_sim_only = false; // -s: ignore a real radio, stay on wchip_sim
 
 static transport_t ate_transport = {
@@ -315,9 +317,18 @@ static usb_dev_info_t gnss_devices[] = {
   {.vid = 0x2c7c, .pid = 0x6007, .int_val = 3}, // EG800Q
 };
 
-static usb_dev_info_t wifi_devices[] = {
-  {.vid = 0x148f, .pid = 0x7601}, // MT7601U
+typedef struct{
+  uint16_t vid, pid;
+  wifi_chip_t* chip;      // backend that drives this dongle
+  usb_device_t* usb;      // that backend's usb_device (to match removals)
+  const char* name;
+} wifi_hw_t;
+
+static wifi_hw_t wifi_devices[] = {
+  {0x148f, 0x7601, &wifi_mt.base,  &wifi_mt.usb_device,  "mt7601u"},
+  {0x0bda, 0xc820, &wifi_rtl.base, &wifi_rtl.usb_device, "rtl8821cu"}, // WLAN function, iface 2
 };
+static wifi_hw_t* wifi_active = NULL; // real radio currently behind /tmp/tty.wifi (NULL = sim)
 
 typedef struct{
   transport_t xport;
@@ -365,17 +376,27 @@ static void usb_on_device(usb_host_t* host, usb_dev_info_t *dev_info, bool added
     else if(usb_device_match(&gnss_dev.usb_device, dev_info)) rc = serial_usb_device_deinit(&gnss_dev);
     if(rc){LOG("gnss device %s", added ? "online" : "offline");}
   }
-  if(!wifi_sim_only && is_device_present(dev_info, wifi_devices, countof(wifi_devices))){
-    bool rc = false;
-    if(added){ // real radio takes over from the sim backend
+  wifi_hw_t* hw = NULL;
+  for(int i = 0; i < countof(wifi_devices); i++)
+    if(dev_info->vid == wifi_devices[i].vid && dev_info->pid == wifi_devices[i].pid) hw = &wifi_devices[i];
+  if(!wifi_sim_only && hw){
+    if(added){ // the most recently plugged real radio takes over the wifi pty
       wifi_dev_deinit(&wifi_dev);
-      rc = wifi_dev_init(&wifi_dev, &wifi_mt.base, dev_info);
+      if(wifi_dev_init(&wifi_dev, hw->chip, dev_info)){
+        wifi_active = hw;
+        LOG("wifi device online (%s)", hw->name);
+      } else {
+        wifi_active = NULL;
+        wifi_dev_init(&wifi_dev, &wifi_sim.base, NULL);
+        LOG("wifi device %s init failed, staying on sim", hw->name);
+      }
     }
-    else if(usb_device_match(&wifi_mt.usb_device, dev_info)){
+    else if(wifi_active == hw && usb_device_match(hw->usb, dev_info)){
       wifi_dev_deinit(&wifi_dev);
-      rc = wifi_dev_init(&wifi_dev, &wifi_sim.base, NULL);
+      wifi_active = NULL;
+      wifi_dev_init(&wifi_dev, &wifi_sim.base, NULL);
+      LOG("wifi device offline (%s), back to sim", hw->name);
     }
-    if(rc){LOG("wifi device %s", added ? "online (mt7601u)" : "offline (sim)");}
   }
 }
 
@@ -426,6 +447,8 @@ int main(int argc, char *argv[]){
   wifi_sim.base.ops = &wchip_sim_ops;
   wifi_mt.base.ops = &wchip_mt7601u_ops;
   wifi_mt.usb_device.host = &usb_host;
+  wifi_rtl.base.ops = &wchip_rtl8821cu_ops;
+  wifi_rtl.usb_device.host = &usb_host;
 
   srand(sys_now());
   io_init_loop();
