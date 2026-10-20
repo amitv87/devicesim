@@ -119,6 +119,20 @@ int usb_device_bulk_transfer(usb_device_t* device, uint8_t endpoint,
   return transferred;
 }
 
+int usb_device_interrupt_transfer(usb_device_t* device, uint8_t endpoint,
+  uint8_t* data, int length, unsigned int timeout){
+  if(!device->devh) return LIBUSB_ERROR_NO_DEVICE;
+  int transferred = 0;
+  int ret = libusb_interrupt_transfer(device->devh, endpoint, data, length, &transferred, timeout);
+  if(ret == LIBUSB_ERROR_TIMEOUT && transferred > 0) return transferred;   // max-packet-sized data, no short packet
+  if(ret < 0){
+    if(ret != LIBUSB_ERROR_TIMEOUT)
+      LOG("libusb_interrupt_transfer ep:0x%02x len:%d ret:%d err:%s", endpoint, length, ret, libusb_strerror(ret));
+    return ret;
+  }
+  return transferred;
+}
+
 int usb_device_find_eps(usb_device_t* device, uint8_t if_no, usb_device_endpoint_t eps[], size_t ep_count){
   int rc = -1;
   if(!device->devh || ep_count <= 0) goto end;

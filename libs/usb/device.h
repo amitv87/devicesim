@@ -36,4 +36,9 @@ int usb_device_control_transfer(usb_device_t* device, uint8_t request_type, uint
 int usb_device_bulk_transfer(usb_device_t* device, uint8_t endpoint,
   uint8_t* data, int length, unsigned int timeout);
 
+// Synchronous interrupt transfer; same contract as usb_device_bulk_transfer, except a
+// timeout is reported quietly (LIBUSB_ERROR_TIMEOUT) since polling for events is normal.
+int usb_device_interrupt_transfer(usb_device_t* device, uint8_t endpoint,
+  uint8_t* data, int length, unsigned int timeout);
+
 #endif
