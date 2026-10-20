@@ -110,7 +110,10 @@ static void timer_cb(io_timer_t* timer){
       if(!(talker_mask & talker_mask_flag)) continue;
       talker_mask &= ~talker_mask_flag;
 
-      gen->sat_groups[j].current_count = 0;
+      // sat_groups has no GN slot (GN = combined fix: RMC/GGA/GST); indexing it
+      // for GN wrote past nmea_gen and corrupted the adjacent static (bthci transport).
+      const_sat_group_t* group = j < countof(gen->sat_groups) ? &gen->sat_groups[j] : NULL;
+      if(group) group->current_count = 0;
 
       do_again:
       buff->r_idx = buff->w_idx = 0;
@@ -138,7 +141,7 @@ static void timer_cb(io_timer_t* timer){
       int rc = gen->output(gen, (char*)buff->bytes, buff->w_idx);
       if(rc != buff->w_idx) return;
 
-      if(gen->sat_groups[j].current_count < gen->sat_groups[j].max_count && i == NMEA_SENTENCE(GSV)) goto do_again;
+      if(group && group->current_count < group->max_count && i == NMEA_SENTENCE(GSV)) goto do_again;
     }
   }
 }
