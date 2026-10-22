@@ -272,7 +272,11 @@ static void on_rx(usb_transfer_t* transfer, uint8_t* data, size_t length){
     uint16_t rate = rxwi[10] | (rxwi[11] << 8);
     if(mpdu_len >= 10 && frame + mpdu_len <= p + seg){
       int rssi = mt_rx_rssi(mt, rxwi, rate);
-      if(mt->scanning){
+      if(mt->mode == WIFI_MODE_MONITOR){
+        // OS owns the MLME (SoftMAC): forward every captured 802.11 frame up the
+        // RAW80211 plane. The OS's vy_mac80211 does scan/auth/assoc itself.
+        wifi_dev_on_rx_80211(mt->base.dev, frame, mpdu_len, mt->channel, (int8_t)rssi, rate);
+      } else if(mt->scanning){
         // active scan: collect beacons/probe-resps into results, don't flood the OS
         if(mpdu_len >= 38 && (frame[0] == 0x80 || frame[0] == 0x50))
           mt_scan_collect(mt, frame, mpdu_len, (int8_t)rssi);
