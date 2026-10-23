@@ -1509,12 +1509,30 @@ static bool mt_op_tx_raw80211(wifi_chip_t* chip, uint8_t* frame, size_t len){
   return mt_tx_frame(mt, frame, len);
 }
 
+/* OS-owned MLME (monitor/SoftMAC): program the HW STA identity + BSS so directed
+ * frames are ACKed in both directions (the AP ACKs our auth/assoc, we ACK the
+ * AP) — the same MT_MAC_ADDR/BSSID writes mt_connect does, exposed so an OS that
+ * runs its own MLME over MONITOR mode can set up a BSS. An all-zero BSSID clears
+ * it, returning to plain monitor capture. */
+static bool mt_op_set_bssid(wifi_chip_t* chip, const uint8_t* bssid){
+  wchip_mt7601u_t* mt = MT(chip);
+  if(!mt->usb_device.usr_data) return false;
+  mt_wr(mt, MT_MAC_ADDR_DW0,  STA_MAC[0] | (STA_MAC[1]<<8) | (STA_MAC[2]<<16) | ((uint32_t)STA_MAC[3]<<24));
+  mt_wr(mt, MT_MAC_ADDR_DW1,  STA_MAC[4] | (STA_MAC[5]<<8));
+  mt_wr(mt, MT_MAC_BSSID_DW0, bssid[0] | (bssid[1]<<8) | (bssid[2]<<16) | ((uint32_t)bssid[3]<<24));
+  mt_wr(mt, MT_MAC_BSSID_DW1, bssid[4] | (bssid[5]<<8));
+  LOG("mt7601u: monitor BSS set %02x:%02x:%02x:%02x:%02x:%02x (HW ACK on)",
+      bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5]);
+  return true;
+}
+
 const wifi_chip_ops_t wchip_mt7601u_ops = {
   .init        = mt_init,
   .deinit      = mt_deinit,
   .reset       = mt_op_reset,
   .set_mode    = mt_set_mode,
   .set_channel = mt_op_set_channel,
+  .set_bssid   = mt_op_set_bssid,
   .scan        = mt_scan,
   .connect     = mt_connect,
   .disconnect  = mt_disconnect,

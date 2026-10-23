@@ -53,6 +53,10 @@ typedef enum{
   WIFI_CMD_CONFIG_DONE  = 0x0A, // empty                (wpa_config_done: profile ready)
   WIFI_CMD_SET_CHANNEL  = 0x0B, // u8 channel           (monitor/SoftMAC tuning)
   WIFI_CMD_RESET        = 0x0C, // empty: clear radio state (deauth, keys, scan) — OS startup
+  WIFI_CMD_SET_BSSID    = 0x0D, // u8 bssid[6]          (monitor/SoftMAC: program the HW BSS +
+                                //                       STA identity so directed frames are ACKed.
+                                //                       The OS owns the MLME; this is radio setup
+                                //                       for an OS-driven auth/assoc. all-zero clears)
 } wifi_cmd_t;
 
 /* CTRL ops: devicesim -> OS (up-calls, the wpa_funcs callback analogs) */

@@ -64,6 +64,9 @@ static void on_ctrl(wifi_dev_t* dev, uint8_t op, uint8_t* p, size_t len){
     case WIFI_CMD_SET_CHANNEL:
       if(len >= 1) CALL(chip, set_channel, p[0]);
       break;
+    case WIFI_CMD_SET_BSSID:
+      if(len >= 6) CALL(chip, set_bssid, p);   // OS-owned MLME: program HW BSS + STA for ACK
+      break;
     case WIFI_CMD_RESET:
       CALL(chip, reset);
       break;

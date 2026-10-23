@@ -66,6 +66,7 @@ typedef struct{
   bool (*reset)(wifi_chip_t* chip);                      // clear radio state (deauth/keys/scan)
   bool (*set_mode)(wifi_chip_t* chip, uint8_t mode);
   bool (*set_channel)(wifi_chip_t* chip, uint8_t channel);
+  bool (*set_bssid)(wifi_chip_t* chip, const uint8_t* bssid);  // monitor/SoftMAC: program HW BSS+STA for ACK
   bool (*scan)(wifi_chip_t* chip, wifi_scan_req_t* req);
   bool (*connect)(wifi_chip_t* chip, wifi_connect_req_t* req); // drive auth+assoc
   bool (*disconnect)(wifi_chip_t* chip, uint8_t reason);
